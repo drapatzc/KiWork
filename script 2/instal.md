@@ -22,15 +22,8 @@ already present is skipped.
   # OpenCode stack (Ollama app, OpenCode, config)
   ./install-opencode.sh
 
-IMPORTANT — afterwards run this once, or open a new terminal:
-
-  source ~/.zshrc
-
-The install scripts write to your shell configuration (~/.zshrc), but a
-script always runs in a child process and cannot change the environment
-of the terminal that started it. Without the `source` the running shell
-keeps its old PATH, and `claude` / `opencode` are reported as
-"command not found".
+Afterwards open a new terminal once (or: source ~/.zshrc) so that
+`claude` and `opencode` are on the PATH.
 
 
 ------------------------------------------------------------------

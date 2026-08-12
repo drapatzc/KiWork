@@ -1,0 +1,7 @@
+9:# export PATH=$HOME/bin:$HOME/.local/bin:/usr/local/bin:$PATH
+138:export PATH="$HOME/.local/bin:$PATH"
+140:alias claude0='/Users/drapatz/GIT-Home/claude0.sh'
+141:alias claude1='/Users/drapatz/GIT-Home/claude1.sh'
+146:# opencode
+147:export PATH=/Users/drapatz/.opencode/bin:$PATH
+148:export PATH="$HOME/.local/bin:$PATH"

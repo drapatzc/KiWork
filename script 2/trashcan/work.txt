@@ -1,0 +1,524 @@
+================================================================
+  Änderungsprotokoll – Lokaler KI-Stack (Claude Code + Ollama)
+  Datum: 2026-06-07
+================================================================
+
+AUSGANGSLAGE / GEMELDETE FEHLER
+-------------------------------
+1. "./claude-cloud.sh" -> FEHLER: ANTHROPIC_API_KEY ist nicht gesetzt.
+   (Kein Bug – Key war einfach nicht in der Shell gesetzt.)
+2. Frage: Muss ich mich vor "./claude-local.sh" bei Claude abmelden? -> Nein.
+3. "API Error: 400 Invalid model name claude-opus-4-8"
+4. "llama-server binary not found" (Ollama konnte gemma4 nicht starten)
+5. "response exceeded the 64000 output token maximum"
+6. Modell-Geschleife "I I I..." + "response exceeded the 4096 output token maximum"
+
+
+URSACHEN
+--------
+- (3) LiteLLM-Config kannte den neuen Modellnamen claude-opus-4-8 nicht.
+- (4) Homebrew-Ollama (Formula) enthielt in v0.30.6 nur den MLX-Runner,
+      nicht "llama-server" -> GGUF-Modelle wie gemma4 nicht startbar.
+- (5/6) num_ctx war mit 8192 viel zu klein für Claude Codes grossen
+      System-Prompt -> Prompt abgeschnitten -> Modell "dreht durch".
+      Zusätzlich: gemma4 ist für agentisches Coding ungeeignet.
+
+
+DURCHGEFÜHRTE ÄNDERUNGEN
+------------------------
+
+A) ~/litellm_config.yaml  (neu geschrieben)
+   - Modell auf "qwen3-coder:30b" umgestellt (MoE, coding-/tool-tauglich).
+   - num_ctx von 8192 auf 32768 erhöht.
+   - claude-opus-4-8 als Modell ergänzt.
+   - Catch-all-Regel  model_name: "*"  -> faengt JEDEN (auch zukünftigen)
+     Modellnamen ab, verhindert künftige "Invalid model name"-Fehler.
+
+B) claude-local.sh
+   - Doku-Hinweis zum einmaligen "Custom API Key"-Auth-Dialog ergänzt
+     (kann beim 1. Start erscheinen, wird gemerkt; nicht unterdrückbar im
+     interaktiven Modus ausser via "claude -p", was den Chat deaktiviert).
+   - export CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192 ergänzt
+     (passt in num_ctx 32768; verhindert die Output-Token-Fehler).
+
+C) localai-up.sh
+   - Start über die OFFIZIELLE Ollama.app ("open -a Ollama")
+     statt "brew services start ollama".
+
+D) localai-down.sh
+   - Beendet jetzt die Ollama.app ("osascript ... quit app Ollama")
+     statt des Brew-Service.
+
+E) install-localai.sh
+   - Installation: "brew install --cask ollama-app" (offizielle App mit
+     vollständigem Runner) statt "brew install ollama" (Formula).
+   - Start: "open -a Ollama" statt "brew services start ollama".
+   - Modell-Download: "qwen3-coder:30b" statt "gemma4:latest".
+   - Erzeugte Config: qwen3-coder:30b, num_ctx 32768, opus-4-8, Catch-all.
+
+
+SYSTEM-/UMGEBUNGSÄNDERUNGEN (ausserhalb des Repos)
+--------------------------------------------------
+- Kaputte Homebrew-Ollama-CLI entfernt:  brew uninstall ollama
+  (inkl. autoremove der Abhängigkeiten mlx, mlx-c -> ~210 MB frei).
+- Offizielle Ollama.app (/Applications/Ollama.app) als Server gestartet;
+  liefert CLI unter /usr/local/bin/ollama.
+- LiteLLM-Proxy mehrfach mit neuer Config neu gestartet (Port 4000).
+
+
+VERIFIZIERT
+-----------
+- gemma4 direkt: lief nach App-Start (ok).
+- claude-opus-4-8 -> LiteLLM -> Ollama -> Modell: liefert "ok".
+- qwen3-coder:30b mit System-Prompt + Frage: kohärenter deutscher Satz,
+  KEIN Geschleife mehr, ~10 s inkl. Modell-Laden.
+- sh -n Syntaxcheck OK für: install-localai.sh, localai-up.sh,
+  localai-down.sh, claude-local.sh.
+
+
+SYSTEM
+------
+- Mac: Apple M4, 32 GB RAM (Mac16,12).
+- Installierte Modelle: qwen3-coder:30b (18 GB), qwen3-coder:latest,
+  gemma4:latest (9,6 GB – wird nicht mehr benötigt).
+
+
+OFFEN / NÄCHSTE SCHRITTE
+------------------------
+- claude-local.sh neu starten, damit CLAUDE_CODE_MAX_OUTPUT_TOKENS greift.
+- Optional: gemma4 entfernen ->  ollama rm gemma4:latest  (spart 9,6 GB).
+- Änderungen sind noch NICHT in git committet (Branch: main).
+- Hinweis: 18-GB-Modell auf 32 GB RAM ist etwas knapp – bei Speicherdruck
+  andere Apps schliessen. Erster Prompt dauert ~10–30 s (Laden), danach flott.
+
+
+================================================================
+  NACHTRAG 1 – Fehler "does not support thinking"
+================================================================
+
+GEMELDETER FEHLER
+-----------------
+"API Error: 500 ... Ollama_chatException - {\"error\":\"qwen3-coder:30b
+ does not support thinking\"}. Received Model Group=claude-opus-4-8"
+
+URSACHE
+-------
+Claude Code (Opus) sendet einen Extended-Thinking-Parameter ("thinking")
+mit. LiteLLM reichte ihn an Ollama durch -> qwen3-coder:30b unterstuetzt
+kein Thinking -> 500-Fehler.
+
+FIX
+---
+~/litellm_config.yaml: bei JEDEM Modell ergaenzt:
+    additional_drop_params: ["thinking", "reasoning_effort"]
+-> LiteLLM verwirft den thinking-Parameter, bevor er Ollama erreicht.
+install-localai.sh: gleiche Zeilen in die erzeugte Config aufgenommen
+(damit ein frisches Setup das Problem nicht hat). sh -n OK.
+LiteLLM mit neuer Config neu gestartet.
+
+VERIFIZIERT
+-----------
+- Vorher: Request mit "thinking" -> 500 (reproduziert).
+- Nachher: gleicher Request -> sauberes "OK".
+
+HINWEIS
+-------
+qwen3-coder arbeitet ohne Thinking -> bei lokalen Anfragen entfaellt das
+"Nachdenken vor der Antwort" (fuer ein Coder-Modell normal, oft schneller).
+
+
+================================================================
+  NACHTRAG 2 – OpenCode fuehrt Tool-Aufrufe nicht aus
+================================================================
+
+GEMELDETER FEHLER
+-----------------
+In OpenCode (lokales Modell "qwen3-coder:latest" via Ollama) wurde auf
+die Frage "Welche Dateien liegen im Ordner" KEIN Befehl ausgefuehrt.
+Statt eines echten Tool-Calls gab das Modell den Aufruf nur als TEXT aus:
+    <function=bash><parameter=command>ls -la</parameter></function>
+
+DIAGNOSE (Schritt fuer Schritt)
+-------------------------------
+1. Template-Verdacht (verworfen): "ollama show qwen3-coder --template"
+   zeigt nur "{{ .Prompt }}". Wirkt kaputt, IST ES ABER NICHT:
+   Der Modelfile nutzt "RENDERER qwen3-coder" + "PARSER qwen3-coder" ->
+   Ollama 0.30.6 macht ChatML-Formatierung und Tool-Call-Parsing nativ
+   im Code; das leere Go-Template ist hier Absicht.
+2. Backend-Test (entscheidend): direkter curl auf
+   http://localhost:11434/v1/chat/completions mit "tools"-Definition.
+   ERGEBNIS: sowohl qwen3-coder:latest ALS AUCH gemma4:latest liefern
+   saubere, strukturierte "tool_calls" zurueck. -> Ollama, Modelle und
+   der /v1-Endpunkt sind voll funktionsfaehig.
+3. Fehler liegt also in OpenCode, nicht im Backend.
+
+URSACHE
+-------
+In ~/.config/opencode/opencode.json waren die Modelle beim selbst
+definierten Provider (npm: @ai-sdk/openai-compatible) OHNE Faehigkeits-
+Kennzeichnung "tool_call" eingetragen. Bei Custom-Providern kennt OpenCode
+die Capabilities nicht (kein models.dev-Eintrag) -> Modell gilt als NICHT
+tool-faehig -> OpenCode schaltet auf Text-Fallback: Werkzeuge werden im
+Prompt beschrieben und das Modell soll sie als Text ausgeben. Genau dieser
+<function=bash>-Text wird dann nicht als echter Tool-Call geparst ->
+nichts wird ausgefuehrt. Zusaetzlich war das Default-Modell "gemma4:latest".
+
+FIX
+---
+A) ~/.config/opencode/opencode.json
+   - "tool_call": true bei allen drei Modellen ergaenzt
+     -> OpenCode nutzt jetzt echtes Function-Calling (nativ ueber /v1).
+   - Default-Modell von "ollama/gemma4:latest" auf
+     "ollama/qwen3-coder:latest" umgestellt (besserer Coder).
+   - "options": { "num_ctx": 32768 } fuer die Qwen-Modelle ergaenzt
+     (sonst nur kleiner Ollama-Default-Kontext).
+B) install-opencode.sh
+   - In der erzeugten Config "tool_call": true bei gemma4:latest ergaenzt,
+     damit eine Neuinstallation gleich korrekt ist.
+
+ZU TESTEN
+---------
+- OpenCode komplett neu starten (Config wird nur beim Start gelesen):
+    ./opencode-start.sh
+- Sicherstellen, dass "Qwen3 Coder Latest" aktiv ist, dann erneut
+  "Welche Dateien liegen im Ordner" -> ls sollte jetzt AUSGEFUEHRT werden.
+- Falls weiterhin Text-Fallback: evtl. aeltere OpenCode-Version, die
+  "tool_call" bei @ai-sdk/openai-compatible ignoriert -> dann nativen
+  "ollama"-Provider-Typ statt "openai-compatible" verwenden.
+
+HINWEIS
+-------
+Dieser OpenCode-Pfad ist unabhaengig vom LiteLLM/Claude-Code-Pfad oben:
+OpenCode spricht Ollama direkt ueber /v1 an, ganz ohne LiteLLM.
+
+
+================================================================
+  NACHTRAG 3 – "extrem langsam" (Claude Code local + OpenCode)
+================================================================
+
+GEMELDETER FEHLER
+-----------------
+Sowohl Claude Code local als auch OpenCode reagieren extrem langsam.
+
+DIAGNOSE (gemessen)
+-------------------
+- ollama ps:        qwen3-coder:latest, 21 GB, 100% GPU, CONTEXT 32768
+- RAM gesamt:       32 GB
+- Freier Speicher:  12 %  (~4 GB)
+- Swap benutzt:     4,9 GB von 6 GB   <-- starkes Swapping
+- UNTIL: "Stopping..." -> Modell wird nach 5 Min Leerlauf entladen.
+
+URSACHE
+-------
+Das 30B-Modell belegt mit KV-Cache ~21 GB auf nur 32 GB RAM. Nach Abzug von
+macOS + Node (Claude Code) + Python (LiteLLM) + OpenCode bleibt zu wenig ->
+macOS lagert dauernd auf die SSD aus (Swapping) -> alles wird zaeh. Das
+Modell selbst (MoE, ~3B aktive Parameter) waere eigentlich schnell.
+Nebenfaktoren: 18-GB-Reload nach jedem 5-Min-Leerlauf; grosser num_ctx
+(32768) vergroessert KV-Cache und Prompt-Verarbeitung.
+
+FIX (gewaehlter Ansatz: kleineres Modell fuer OpenCode)
+-------------------------------------------------------
+- "ollama pull qwen2.5-coder:14b" (~9 GB, Tool-faehig).
+- ~/.config/opencode/opencode.json:
+    * Modell "qwen2.5-coder:14b" ergaenzt (tool_call: true, num_ctx 16384).
+    * Default-Modell auf "ollama/qwen2.5-coder:14b" umgestellt.
+  -> ~9 GB statt 21 GB -> ~18 GB RAM frei -> KEIN Swapping mehr.
+  qwen3-coder:30b bleibt installiert (fuer Claude Code via LiteLLM).
+
+WEITERE OPTIONEN (nicht umgesetzt)
+----------------------------------
+- OLLAMA_KEEP_ALIVE=-1 -> Modell bleibt geladen (spart 18-GB-Reloads),
+  nur sinnvoll mit ausreichend freiem RAM.
+- num_ctx weiter senken (Claude Code braucht aber 32768).
+- Nicht beide Stacks gleichzeitig laufen lassen; RAM-Fresser schliessen.
+
+ZU TESTEN
+---------
+- OpenCode neu starten (./opencode-start.sh), Modell
+  "Qwen2.5 Coder 14B (schnell)" pruefen -> sollte spuerbar schneller sein.
+
+
+================================================================
+  NACHTRAG 4 – Kompletter Umstieg auf schnelle Modelle
+================================================================
+
+ENTSCHEIDUNG
+------------
+Vollstaendiger Wechsel weg vom 30B-MoE hin zu dichten Qwen2.5-Coder-
+Modellen, die komplett in 32 GB RAM passen (kein Swapping). qwen3-coder
+wurde aus Ollama entfernt (durch den Nutzer).
+
+NEUE MODELLE (Ollama)
+---------------------
+- qwen2.5-coder:14b (~9 GB)  -> Standard, beste Balance Tempo/Qualitaet.
+- qwen2.5-coder:7b  (~4,7 GB) -> "Turbo", maximales Tempo.
+Beide tool-faehig.
+
+DURCHGEFUEHRTE AENDERUNGEN
+--------------------------
+A) ~/.config/opencode/opencode.json
+   - Modelle "qwen2.5-coder:7b" (Turbo) und "qwen2.5-coder:14b" (schnell)
+     ergaenzt, beide tool_call: true, num_ctx 16384.
+   - Default-Modell: ollama/qwen2.5-coder:14b.
+B) ~/litellm_config.yaml  (Backup: ~/litellm_config.yaml.bak)
+   - ALLE Eintraege von ollama_chat/qwen3-coder:30b auf
+     ollama_chat/qwen2.5-coder:14b umgestellt (num_ctx 32768 beibehalten,
+     da Claude Code den grossen System-Prompt braucht).
+   - LiteLLM mit neuer Config neu gestartet (Port 4000).
+C) install-localai.sh
+   - Download + erzeugte Config: qwen2.5-coder:14b statt qwen3-coder:30b.
+   - sh -n OK.
+
+WARUM
+-----
+Dichtes 14B (~9 GB) + KV-Cache passt mit ~18 GB Reserve in 32 GB RAM ->
+kein Swapping mehr -> spuerbar schneller, obwohl mehr aktive Parameter
+als das 30B-MoE gerechnet werden. Der frühere Engpass war ausschliesslich
+der 21-GB-Speicherbedarf, nicht die Rechenlast.
+
+OFFEN
+-----
+- gemma4:latest (9,6 GB) noch installiert, nicht mehr benoetigt ->
+  optional "ollama rm gemma4:latest" + Eintrag aus opencode.json.
+- Aenderungen noch NICHT in git committet.
+
+
+================================================================
+  NACHTRAG 5 – Kehrtwende: qwen2.5-coder taugt nicht, gemma4 gewinnt
+================================================================
+
+BEFUND (gemessen, temp 0, gleicher Tool-Call gegen /api/chat)
+-------------------------------------------------------------
+- qwen2.5-coder:14b: 0/3 -> gibt Tool-Call nur als nacktes JSON im
+  "content" aus, OHNE die <tool_call>-Tags, die Ollama zum Parsen braucht.
+  Ergebnis tool_calls=null -> NICHT ausfuehrbar.
+- qwen2.5-coder:7b:  0/1 -> dito.
+  (Template HAT zwar einen Tools-Block, aber das Modell haelt sich nicht
+   an das <tool_call>-Format. qwen2.5-coder ist auf Code-Completion
+   trainiert, nicht auf agentisches Tool-Calling.)
+- gemma4:latest:     3/3 -> sauberes, strukturiertes tool_calls. Funktioniert.
+- qwen3-coder:30b:   sauber, aber 21 GB -> Swap -> langsam (siehe NT 4).
+
+FAZIT / ENTSCHEIDUNG
+--------------------
+gemma4:latest ist das EINZIGE installierte Modell, das BEIDES kann:
+schnell (8B, 9,6 GB, 131k Kontext, kein Swap auf 32 GB) UND verlaessliches
+natives Tool-Calling. -> Komplett auf gemma4 umgestellt.
+(Einschraenkung: gemma4 ist Allzweck, kein spezialisierter Coder; bei sehr
+komplexen reinen Code-Aufgaben schwaecher als ein Coder-Modell.)
+
+DURCHGEFUEHRTE AENDERUNGEN
+--------------------------
+A) ~/.config/opencode/opencode.json
+   - qwen2.5-coder:7b/:14b- und qwen3-coder-Eintraege entfernt.
+   - Nur noch gemma4:latest (tool_call: true, num_ctx 16384).
+   - Default-Modell: ollama/gemma4:latest.
+B) ~/litellm_config.yaml
+   - ALLE Eintraege auf ollama_chat/gemma4:latest (num_ctx 32768 -> passt,
+     da gemma4 131072 Kontext kann). LiteLLM neu gestartet (Port 4000).
+C) install-localai.sh
+   - Download + Config zurueck auf gemma4:latest. sh -n OK.
+D) Ollama aufgeraeumt
+   - "ollama rm qwen2.5-coder:7b qwen2.5-coder:14b" (untauglich fuer Tools).
+   - Belegung jetzt nur noch ~8,9 GB (vorher 30 GB).
+
+VERIFIZIERT
+-----------
+- claude-opus-4-8 -> LiteLLM -> gemma4 + Tool: liefert sauberes,
+  strukturiertes tool_calls ("bash" / "ls -la"). End-to-End ok.
+- gemma4 direkt /api/chat: 3/3 strukturierte tool_calls.
+
+ZU TESTEN (durch Nutzer)
+------------------------
+- OpenCode neu starten (./opencode-start.sh) -> "Welche Dateien liegen im
+  Ordner" sollte jetzt ausgefuehrt werden (Modell: Gemma 4).
+- claude-local.sh neu starten -> Tool-Aufrufe sollten ausgefuehrt werden.
+
+
+================================================================
+  NACHTRAG 6 – "extrem langsam" trotz gemma4 (2 Min fuer 1 Satz)
+================================================================
+
+GEMELDETER FEHLER
+-----------------
+OpenCode/Claude Code mit gemma4 weiter extrem langsam; "Bist Du schnell?"
+dauerte in OpenCode ~2 Minuten.
+
+DIAGNOSE (gemessen)
+-------------------
+- ollama ps zeigte gemma4 dauerhaft im Zustand "Stopping...".
+- llama-server-Prozess bei nur 2,6% CPU -> rechnete praktisch NICHTS,
+  trotzdem stauten sich Anfragen dahinter (festgefahrener Runner).
+- RAM 52% frei, 100% GPU -> KEIN Speicher- und KEIN GPU/CPU-Problem.
+- Nach Neustart der Ollama-App: gemma4 misst sauber
+    Laden 2,4 s (kalt) / 0,24 s (warm)
+    Prompt-Eval ~77-152 tok/s, Generierung ~24-25 tok/s.
+  -> Das Modell ist voellig in Ordnung und schnell.
+
+URSACHE
+-------
+Staendiges Entladen/Neu-Laden der 9,7-GB-gemma4, weil die Aufrufer
+UNTERSCHIEDLICHE num_ctx anforderten (OpenCode 16384, LiteLLM 32768, Tests
+ohne Wert). Jeder Wechsel -> Ollama entlaedt + laedt neu; dabei blieb der
+Runner im "Stopping"-Zustand haengen -> minutenlange Blockade. Der 5-Min-
+Default-Keep-Alive verschaerfte das durch zusaetzliche Unload/Reload-Zyklen.
+
+FIX
+---
+1) num_ctx VEREINHEITLICHT auf 32768 ueberall:
+   - ~/.config/opencode/opencode.json: gemma4 num_ctx 16384 -> 32768
+     (identisch zu litellm_config.yaml) -> nur EINE Modell-Instanz,
+     kein Neu-Laden mehr beim Wechsel der Werkzeuge.
+2) Modell dauerhaft im RAM pinnen (keep_alive:-1):
+   - HINWEIS: "launchctl setenv OLLAMA_KEEP_ALIVE -1" wirkt NICHT -- die
+     macOS-Ollama-App uebernimmt das Env nicht (geprueft: getenv=-1, aber
+     Prozess-Env leer). Stattdessen zuverlaessig per Request keep_alive:-1.
+   - localai-up.sh und opencode-up.sh: nach Ollama-Bereitschaft ein
+     Vorlade-Request mit {"options":{"num_ctx":32768},"keep_alive":-1}.
+     -> ollama ps zeigt UNTIL "Forever"; ein spaeterer Request OHNE
+        keep_alive setzt das NICHT zurueck (getestet).
+
+VERIFIZIERT
+-----------
+- Nach Neustart + Pin: ollama ps -> UNTIL "Forever", 100% GPU, ctx 32768.
+- Normaler Request ohne keep_alive laesst "Forever" bestehen.
+- sh -n OK fuer opencode-up.sh, localai-up.sh.
+
+HINWEIS
+-------
+Bleibt es doch mal haengen ("Stopping..." in ollama ps): Ollama-App einmal
+beenden und neu starten (bzw. ./*-up.sh erneut), dann pinnt es wieder.
+
+
+================================================================
+  NACHTRAG 7 – Skript-Konsistenz, Anleitung, finale Tempo-Messung
+================================================================
+
+A) SKRIPT-KORREKTUREN (Konsistenz beider Stacks)
+   - claude-status.sh: Verweis "claude-cloud.sh" -> "claude-api.sh"
+     korrigiert; "claude-abo.sh" ergaenzt (alle 3 Backends gelistet).
+   - opencode-up.sh / opencode-down.sh / install-opencode.sh:
+     Ollama jetzt ueber die OFFIZIELLE App (open -a Ollama / Cask
+     "ollama-app") statt brew-Service -- konsistent zu den localai-Skripten
+     (nur die App bringt den GGUF-Runner mit).
+   - install-localai.sh: Catch-all-Kommentar "-> qwen3-coder" -> "-> gemma4".
+   - sh -n OK fuer alle 12 *.sh.
+
+B) ANLEITUNG.md (neu erstellt)
+   - Schritt-fuer-Schritt: Installation, Start/Run/Stop beider Werkzeuge,
+     Status, Modellverwaltung, Troubleshooting (inkl. "Stopping..."-Fix und
+     num_ctx-Gleichheit). Spiegelt den finalen Stand der Skripte wider.
+
+C) FINALE TEMPO-MESSUNG (gemma4 gepinnt, num_ctx 32768, warm)
+   - OpenCode-Pfad (/v1, 3 Anfragen): je ~0,9 s, ollama ps blieb
+     32768/Forever -> KEIN Neu-Laden zwischen Anfragen.
+   - Claude-Code-Pfad (LiteLLM): ~2,85 s fuer kurze Antwort.
+   - Generierung ~25-33 tok/s; lange Antworten (~300 tok) ~10-12 s.
+   - FAZIT: krankhafte Langsamkeit/Haenger behoben; verbleibendes Tempo ist
+     die normale Hardware-Grenze von gemma4 (8B) auf dem M4.
+   - Hinweis: Eine Zwischenmessung zeigte "188 s" -- war reine Warteschlange
+     hinter eigenen Test-Anfragen, KEIN echtes Problem (nach sauberem
+     Neustart bestaetigt).
+
+D) PARALLELBETRIEB (dokumentiert in ANLEITUNG)
+   - Beide Werkzeuge teilen EINE gemma4-Instanz. Laeuft OpenCode schon,
+     genuegt fuer Claude Code zusaetzlich ./localai-up.sh (startet nur noch
+     LiteLLM dazu; stoert das laufende Ollama nicht) + ./claude-local.sh.
+   - Gleichzeitige Anfragen werden seriell abgearbeitet (eine wartet kurz);
+     RAM unkritisch, da nur ein Modell geladen.
+
+
+================================================================
+  NACHTRAG 8 – Claude Code lokal: 10 Min fuer "zeige Dateien"
+================================================================
+
+GEMELDETER FEHLER
+-----------------
+Claude Code lokal brauchte ~10 Min fuer "Zeige mir alle Dateien im Ordner",
+waehrend OpenCode parallel lief.
+
+URSACHEN (zwei, kombiniert)
+---------------------------
+1) Claude Codes RIESIGER System-Prompt: gemessen ~4800+ Tokens, die gemma4
+   mit nur ~188 tok/s einliest -> ~26 s NUR Prompt-Verarbeitung, und das
+   pro agentischer Runde (denken->Tool->Ergebnis->...). Summiert sich.
+2) KONTENTION: OpenCode (gemma4) lief gleichzeitig -> Claude Code und
+   OpenCode teilten sich EINE GPU -> beide blockierten sich. Das war der
+   Hauptverstaerker der 10 Minuten. (Reproduziert: jede saubere Messung
+   scheiterte, solange OpenCode lief.)
+
+ENTSCHEIDUNG (Nutzer: Claude Code lokal behalten)
+-------------------------------------------------
+Claude-Code-Pfad auf ein KLEINES Modell umgestellt: llama3.2:3b (~2 GB).
+Grund: ein 3B liest den grossen Prompt ~2x schneller ein und generiert
+schneller als gemma4 (8B). Tool-Calling getestet: 2/2 strukturiert.
+OpenCode bleibt auf gemma4.
+
+DURCHGEFUEHRTE AENDERUNGEN
+--------------------------
+A) ollama pull llama3.2:3b.
+B) ~/litellm_config.yaml (Backup .bak2): ALLE Eintraege auf
+   ollama_chat/llama3.2:3b (num_ctx 32768). LiteLLM neu gestartet.
+C) localai-up.sh: pinnt jetzt llama3.2:3b (keep_alive:-1) statt gemma4.
+D) install-localai.sh: pull + Config auf llama3.2:3b. sh -n OK.
+E) claude-local.sh: Anzeige "llama3.2:3b" + Warnung "nicht gleichzeitig
+   mit OpenCode".
+
+VERIFIZIERT
+-----------
+- claude-opus-4-8 -> LiteLLM -> llama3.2:3b + Tool: strukturiertes
+  tool_calls, 7,2 s end-to-end (vorher gemma4: 25-123 s).
+
+WICHTIG / ERWARTUNG
+-------------------
+- NICHT OpenCode und Claude Code gleichzeitig Anfragen schicken lassen
+  (eine GPU). Fuer Claude Code ggf. OpenCode vorher beenden.
+- Agentische Aufgaben bleiben auf lokaler Hardware spuerbar langsamer als
+  Cloud; llama3.2:3b macht es brauchbarer, aber nicht "schnell".
+- Wer Claude Code WIRKLICH schnell will: ./claude-abo.sh oder
+  ./claude-api.sh (Cloud).
+- Modelle jetzt: gemma4 (OpenCode) + llama3.2:3b (Claude Code), beide
+  passen zusammen in 32 GB.
+
+
+================================================================
+  NACHTRAG 9 – Zurueck auf gemma4 fuer BEIDE (Test auf Mac Ultra)
+================================================================
+
+ENTSCHEIDUNG (Nutzer)
+---------------------
+Claude Code wieder auf gemma4:latest umstellen -- identisch zu OpenCode.
+Auf M4/32 GB bleibt Claude Code lokal langsam (siehe NT 8), aber der Nutzer
+testet auf einer Mac Ultra (deutlich mehr GPU/Bandbreite -> dort schnell).
+Vorteil der Gleichheit: EINE gemeinsame gemma4-Instanz fuer beide Werkzeuge,
+kein Modell-Wechsel/Neu-Laden.
+
+DURCHGEFUEHRTE AENDERUNGEN
+--------------------------
+- ~/litellm_config.yaml: alle Eintraege zurueck auf ollama_chat/gemma4:latest
+  (num_ctx 32768, identisch zu opencode.json).
+- localai-up.sh: pinnt wieder gemma4 (keep_alive:-1, num_ctx 32768).
+- install-localai.sh: pull + Config zurueck auf gemma4:latest. sh -n OK.
+- claude-local.sh: Anzeige wieder "gemma4" + Hinweis M4 langsam / Ultra schnell.
+- ANLEITUNG.md: beide Werkzeuge gemma4; Hardware-Hinweis M4 vs Mac Ultra.
+- llama3.2:3b bleibt installiert (nicht entfernt; ~2 GB), wird nicht genutzt.
+
+ZUSTAND
+-------
+- litellm + opencode beide -> ollama/gemma4:latest (verifiziert per grep).
+- Lokaler Stack war beim Umbau gestoppt; greift beim naechsten ./localai-up.sh
+  bzw. ./opencode-up.sh.
+
+SKRIPT-BUG BEHOBEN (down-Skripte geben RAM jetzt frei)
+------------------------------------------------------
+Frueher beendeten localai-down.sh / opencode-down.sh die Ollama-App per
+"osascript quit" NICHT zuverlaessig -> Modell blieb im RAM (verschaerft durch
+keep_alive:-1 "Forever"). FIX:
+- Erst Modelle explizit entladen:
+    ollama ps | awk 'NR>1{print $1}' | while read m; do ollama stop "$m"; done
+  -> gibt RAM zuverlaessig frei, auch beim Forever-Pin.
+- Dann App beenden: osascript quit PLUS pkill (ollama serve / llama-server /
+  Ollama.app) als Nachhilfe.
+Live getestet: gemma4 (9,7 GB, Forever) -> nach ./localai-down.sh "Ollama
+gestoppt", kein Modell mehr im RAM. sh -n OK fuer beide down-Skripte.

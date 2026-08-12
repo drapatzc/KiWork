@@ -33,5 +33,10 @@ echo "==> Making sure all .sh scripts here are executable"
 chmod +x "$KIWORK_DIR"/*.sh
 
 echo ""
-echo "Done. Open a new terminal (or: source ~/.zshrc) so the scripts"
-echo "are on the PATH."
+echo "IMPORTANT: the PATH entry only takes effect in new shells. The"
+echo "running terminal does not know about it yet. Run this once, or"
+echo "open a new terminal:"
+echo ""
+echo "    source ~/.zshrc"
+echo ""
+echo "Done. Afterwards the scripts are callable from anywhere by filename."

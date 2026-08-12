@@ -1,0 +1,63 @@
+litellm_settings:
+  drop_params: true
+
+# Lokales Modell: gemma4:latest (8B, 131k Kontext) -- IDENTISCH zu OpenCode
+# (opencode.json), beide num_ctx 32768 -> EINE gemeinsame Modell-Instanz,
+# kein Neu-Laden beim Wechsel. Auf M4/32 GB ist Claude Code damit langsam
+# (grosser System-Prompt, viele Aufrufe); auf einer Mac Ultra deutlich
+# schneller. Tool-Calling: gemma4 liefert strukturierte tool_calls.
+# num_ctx muss gross genug fuer Claude Codes grossen System-Prompt sein,
+# sonst wird er abgeschnitten und das Modell "dreht durch" (z.B. "I I I...").
+model_list:
+  # Aktuelle Claude Code Modellnamen
+  - model_name: claude-opus-4-8
+    litellm_params:
+      model: ollama_chat/gemma4:latest
+      api_base: http://localhost:11434
+      num_ctx: 32768
+      additional_drop_params: ["thinking", "reasoning_effort"]
+
+  - model_name: claude-haiku-4-5-20251001
+    litellm_params:
+      model: ollama_chat/gemma4:latest
+      api_base: http://localhost:11434
+      num_ctx: 32768
+      additional_drop_params: ["thinking", "reasoning_effort"]
+
+  - model_name: claude-sonnet-4-6
+    litellm_params:
+      model: ollama_chat/gemma4:latest
+      api_base: http://localhost:11434
+      num_ctx: 32768
+      additional_drop_params: ["thinking", "reasoning_effort"]
+
+  - model_name: claude-opus-4-7
+    litellm_params:
+      model: ollama_chat/gemma4:latest
+      api_base: http://localhost:11434
+      num_ctx: 32768
+      additional_drop_params: ["thinking", "reasoning_effort"]
+
+  # Ältere Modellnamen (Fallback)
+  - model_name: claude-3-5-sonnet-20241022
+    litellm_params:
+      model: ollama_chat/gemma4:latest
+      api_base: http://localhost:11434
+      num_ctx: 32768
+      additional_drop_params: ["thinking", "reasoning_effort"]
+
+  - model_name: claude-3-opus-20240229
+    litellm_params:
+      model: ollama_chat/gemma4:latest
+      api_base: http://localhost:11434
+      num_ctx: 32768
+      additional_drop_params: ["thinking", "reasoning_effort"]
+
+  # Catch-all: JEDER andere (auch zukuenftige) Modellname -> qwen3-coder.
+  # Verhindert "Invalid model name"-Fehler bei Claude-Code-Updates.
+  - model_name: "*"
+    litellm_params:
+      model: ollama_chat/gemma4:latest
+      api_base: http://localhost:11434
+      num_ctx: 32768
+      additional_drop_params: ["thinking", "reasoning_effort"]

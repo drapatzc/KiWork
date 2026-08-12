@@ -128,12 +128,6 @@ else
 fi
 
 echo ""
-echo "IMPORTANT: this installation changed your shell configuration"
-echo "(PATH for pipx / npm). The running terminal does not know about it"
-echo "yet. Run this once, or open a new terminal:"
-echo ""
-echo "    source ~/.zshrc"
-echo ""
 echo "Done. Next steps:"
 echo "  ./localai-up.sh        # start the stack"
 echo "  ./claude-local.sh      # Claude Code with gemma4"

@@ -79,12 +79,6 @@ else
 fi
 
 echo ""
-echo "IMPORTANT: the OpenCode installer added \$HOME/.local/bin to the PATH"
-echo "in your shell configuration. The running terminal does not know about"
-echo "it yet. Run this once, or open a new terminal:"
-echo ""
-echo "    source ~/.zshrc"
-echo ""
 echo "Done. Next steps:"
 echo "  ./opencode-up.sh         # start Ollama"
 echo "  ./opencode-start.sh      # start OpenCode"
