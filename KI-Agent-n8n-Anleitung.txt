@@ -1,0 +1,193 @@
+Ja. Hier ist eine ausführliche Anleitung für n8n kostenlos lokal auf dem Mac mit Docker, inklusive Ollama-Anbindung.
+
+n8n empfiehlt Docker für Self-Hosting. Ohne Lizenz läuft n8n als kostenlose Community Edition.  ￼
+
+1. Voraussetzungen
+
+Du brauchst:
+
+docker --version
+docker compose version
+ollama --version
+
+Falls Docker fehlt: Docker Desktop für Mac installieren.
+
+2. Projektordner anlegen
+
+mkdir -p ~/GIT-Home/n8n-local
+cd ~/GIT-Home/n8n-local
+
+3. docker-compose.yml erstellen
+
+nano docker-compose.yml
+
+Inhalt:
+
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: n8n-local
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - TZ=Europe/Berlin
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - N8N_SECURE_COOKIE=false
+      - N8N_DIAGNOSTICS_ENABLED=false
+      - N8N_PERSONALIZATION_ENABLED=false
+    volumes:
+      - n8n_data:/home/node/.n8n
+volumes:
+  n8n_data:
+
+4. n8n starten
+
+docker compose up -d
+
+Dann öffnen:
+
+open http://localhost:5678
+
+Beim ersten Start legst du deinen lokalen n8n-Account an.
+
+5. n8n stoppen
+
+docker compose down
+
+6. n8n aktualisieren
+
+cd ~/GIT-Home/n8n-local
+docker compose pull
+docker compose up -d
+
+Deine Workflows bleiben erhalten, weil sie im Docker-Volume n8n_data liegen.
+
+7. Ollama für n8n erreichbar machen
+
+Auf dem Mac läuft Ollama meist unter:
+
+http://localhost:11434
+
+Innerhalb eines Docker-Containers ist localhost aber der Container selbst. Deshalb nutzt du in n8n:
+
+http://host.docker.internal:11434
+
+Beispiel für einen HTTP Request Node in n8n:
+
+Method: POST
+URL: http://host.docker.internal:11434/api/generate
+
+Body:
+
+{
+  "model": "gemma4:12b",
+  "prompt": "Schreibe eine kurze Zusammenfassung zu n8n und Ollama auf Deutsch.",
+  "stream": false
+}
+
+8. Einfacher Workflow mit Ollama
+
+In n8n:
+
+1. Neuer Workflow
+2. Node hinzufügen: Manual Trigger
+3. Node hinzufügen: HTTP Request
+4. HTTP Request konfigurieren:
+
+Method: POST
+URL: http://host.docker.internal:11434/api/generate
+Content-Type: JSON
+
+Body:
+
+{
+  "model": "gemma4:12b",
+  "prompt": "Erstelle einen kurzen LinkedIn-Post über iOS 27 für Entwickler.",
+  "stream": false
+}
+
+Danach ausführen. Die Antwort findest du im Feld response.
+
+9. Beispiel: Markdown automatisch erzeugen
+
+Prompt im HTTP Request:
+
+{
+  "model": "gemma4:12b",
+  "prompt": "Erstelle eine Markdown-Datei mit einer Entwickler-Zusammenfassung zu SwiftUI in iOS 27.",
+  "stream": false
+}
+
+Danach kannst du mit einem weiteren Node die Ausgabe speichern, zum Beispiel über:
+
+Write Binary File
+
+oder per Script/Command, wenn du n8n entsprechend erweiterst.
+
+10. Sinnvolle Workflows für dich
+
+Für dein Setup wären diese Automationen interessant:
+
+iOS 27 Release Notes holen
+        ↓
+Änderungen zusammenfassen
+        ↓
+Markdown-Datei aktualisieren
+        ↓
+DOCX erzeugen
+        ↓
+PDF erzeugen
+
+Oder:
+
+Crashlog einfügen
+        ↓
+Ollama / Claude / OpenAI analysiert
+        ↓
+Fehlerursache + mögliche Lösung ausgeben
+
+Oder:
+
+Markdown-Dokument
+        ↓
+Übersetzen mit KI
+        ↓
+DE/EN-Dateien speichern
+        ↓
+PDF erzeugen
+
+11. Backup
+
+Backup des n8n-Volumes:
+
+docker run --rm \
+  -v n8n-local_n8n_data:/data \
+  -v "$PWD":/backup \
+  alpine \
+  tar czf /backup/n8n-backup.tar.gz -C /data .
+
+Restore:
+
+docker run --rm \
+  -v n8n-local_n8n_data:/data \
+  -v "$PWD":/backup \
+  alpine \
+  sh -c "cd /data && tar xzf /backup/n8n-backup.tar.gz"
+
+12. Kurz gesagt
+
+Für lokal kostenlos:
+
+docker compose up -d
+open http://localhost:5678
+
+Für Ollama in n8n:
+
+http://host.docker.internal:11434
+
+Für dein lokales Modell:
+
+gemma4:12b
