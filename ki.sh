@@ -464,6 +464,18 @@ require_codex() {
     print_ok "Codex installiert."
 }
 
+# Antigravity (Google) wird nicht automatisch installiert, weil es keine
+# Homebrew-Formula gibt - stattdessen wird auf den Menüpunkt "CLI
+# installieren" (install_antigravity_native) verwiesen.
+require_agy() {
+    have_cmd agy && return 0
+
+    print_error "Antigravity-CLI (agy) ist nicht installiert."
+    printf 'Installieren über "CLI installieren" oder:\n'
+    printf '  curl -fsSL https://antigravity.google/cli/install.sh | bash\n'
+    return 1
+}
+
 #-------------------------------------------------------------------------------
 # 7. Update-Prüfung
 #-------------------------------------------------------------------------------
@@ -1177,6 +1189,66 @@ run_claude_api() {
     exec claude "$@"
 }
 
+# Startet Codex direkt gegen die OpenAI-Cloud (eigenes ChatGPT-/API-Login),
+# nicht gegen ein lokales Ollama-Modell.
+run_codex_cloud() {
+    require_codex || return 1
+
+    print_heading "Codex – Cloud"
+    printf 'Kosten:    über dein ChatGPT-Abo bzw. deinen API-Key\n\n'
+
+    exec codex "$@"
+}
+
+# Startet Antigravity (Google) über sein CLI-Kommando "agy".
+run_antigravity() {
+    require_agy || return 1
+
+    print_heading "Antigravity"
+    exec agy "$@"
+}
+
+# Öffnet eine URL im Standard-Browser Safari, für die "Hilfe"-Menüpunkte der
+# einzelnen Assistenten.
+#
+# Rückgabe: 0 = geöffnet, 1 = Safari liess sich nicht starten
+open_in_safari() {
+    local url="$1"
+    open -a Safari "$url" 2>/dev/null || { print_error "Safari liess sich nicht öffnen. URL: $url"; return 1; }
+}
+
+# Installiert Claude Code über den offiziellen nativen Installer. Alternative
+# zu require_claude() (das über npm installiert) für alle, die die
+# eigenständige CLI statt des npm-Pakets bevorzugen.
+install_claude_native() {
+    print_warning "Installiert Claude Code über den offiziellen Installer (claude.ai/install.sh)."
+    confirm "Jetzt ausführen" || return 1
+
+    curl -fsSL https://claude.ai/install.sh | bash || { print_error "Installation fehlgeschlagen."; return 1; }
+    hash -r
+    print_ok "Claude Code installiert."
+}
+
+# Installiert Codex über den offiziellen nativen Installer von OpenAI.
+install_codex_native() {
+    print_warning "Installiert Codex über den offiziellen Installer (chatgpt.com/codex/install.sh)."
+    confirm "Jetzt ausführen" || return 1
+
+    curl -fsSL https://chatgpt.com/codex/install.sh | sh || { print_error "Installation fehlgeschlagen."; return 1; }
+    hash -r
+    print_ok "Codex installiert."
+}
+
+# Installiert die Antigravity-CLI (agy) über den offiziellen Installer.
+install_antigravity_native() {
+    print_warning "Installiert die Antigravity-CLI (antigravity.google/cli/install.sh)."
+    confirm "Jetzt ausführen" || return 1
+
+    curl -fsSL https://antigravity.google/cli/install.sh | bash || { print_error "Installation fehlgeschlagen."; return 1; }
+    hash -r
+    print_ok "Antigravity-CLI installiert."
+}
+
 #-------------------------------------------------------------------------------
 # 12. Arbeitsspeicher beobachten und freigeben
 #-------------------------------------------------------------------------------
@@ -1470,7 +1542,10 @@ show_info() {
     printf '\n%s Befehle im Terminal (ki.sh <befehl>):%s\n' "$BOLD" "$RESET"
     printf '  setup                    alles prüfen / installieren\n'
     printf '  code|opencode|codex [1|2|3|modell]  lokal starten\n'
-    printf '  claude | api             Cloud (Abo / API-Key)\n'
+    printf '  claude | api             Claude Code Cloud (Abo / API-Key)\n'
+    printf '  codexcloud | agy         Codex bzw. Antigravity direkt ausführen\n'
+    printf '  install-claude|-codex|-agy  jeweilige CLI über den nativen Installer\n'
+    printf '  help-claude|-codex|-agy  Hilfe-Seite in Safari öffnen\n'
     printf '  start | stop             Ollama starten / beenden\n'
     printf '  load | loadall           Modell(e) in den RAM laden\n'
     printf '  status | ps              RAM-Status anzeigen\n'
@@ -1486,6 +1561,7 @@ show_info() {
     printf ' 🖥️  OpenCode: Open-Source KI-Coding-Assistent, der ebenfalls mit lokalen Ollama-Modellen genutzt werden kann.\n'
     printf ' 🧭 Codex: KI-Coding-Assistent von OpenAI, der ebenfalls mit lokalen Ollama-Modellen genutzt werden kann.\n'
     printf ' 🤖 Claude Code: KI-Entwicklungsassistent von Anthropic, der auch mit lokalen Ollama-Modellen genutzt werden kann.\n'
+    printf ' 🌐 Antigravity: KI-Coding-Assistent von Google, gesteuert über sein eigenes CLI-Kommando "agy".\n'
     printf ' 🧠 Qwen3-Coder 30B: Ideal für Softwareentwicklung, Refactoring und große Codeprojekte.\n'
     printf ' ⚡ Nemotron 3.5 Lightning: Ideal für Agenten, Tool-Calling und komplexe Analyseaufgaben.\n'
     printf ' 💎 Gemma 4: Ideal für Dokumentation, Erklärungen und allgemeine Entwicklungsaufgaben.\n'
@@ -1504,16 +1580,26 @@ Mit "-y" oder "--yes" laufen alle Rückfragen automatisch durch.
 ${BOLD}Einrichtung${RESET}
   ki setup [-y]             Alle Komponenten & Modelle prüfen/installieren
 
-${BOLD}OpenCode starten${RESET}
-  ki opencode [1|2|3|modell]  OpenCode mit lokalem Ollama-Modell
+${BOLD}Claude Code${RESET}
+  ki code [1|2|3|modell]   Mit lokalem Ollama-Modell
+  ki claude                claude ausführen (Cloud, eigenes Abo)
+  ki api                   claude ausführen mit Anthropic API-Key
+  ki install-claude        CLI installieren (offizieller Installer)
+  ki help-claude           Hilfe-Seite in Safari öffnen
 
-${BOLD}Codex starten${RESET}
-  ki codex [1|2|3|modell]     Codex (OpenAI) mit lokalem Ollama-Modell
+${BOLD}Codex${RESET}
+  ki codex [1|2|3|modell]  Mit lokalem Ollama-Modell
+  ki codexcloud            codex ausführen (Cloud, eigenes Login)
+  ki install-codex         CLI installieren (offizieller Installer)
+  ki help-codex            Hilfe-Seite in Safari öffnen
 
-${BOLD}Claude Code starten${RESET}
-  ki code [1|2|3|modell]   Claude Code mit lokalem Ollama-Modell
-  ki claude                Claude Code mit deinem Claude-Abo
-  ki api                   Claude Code mit Anthropic API-Key
+${BOLD}Antigravity${RESET}
+  ki agy                   agy ausführen
+  ki install-agy           CLI installieren (offizieller Installer)
+  ki help-agy              Hilfe-Seite in Safari öffnen
+
+${BOLD}OpenCode${RESET}
+  ki opencode [1|2|3|modell]  Mit lokalem Ollama-Modell
 
 ${BOLD}Ollama steuern${RESET}
   ki start                 Ollama starten (installiert es bei Bedarf)
@@ -1781,12 +1867,10 @@ choose_from_list() {
 # Das interaktive Hauptmenü. Läuft in einer Schleife, bis "q" gewählt wird
 # oder einer der Assistenten per "exec" übernimmt.
 #
-# Die beiden Cloud-Punkte [04] und [05] sind standardmässig ausgeblendet, weil
-# sie Geld kosten bzw. Daten an einen Cloud-Dienst schicken. Ein grosses "C"
-# blendet sie ein und wieder aus; darauf wird bewusst nirgends hingewiesen.
+# Jeder Assistent (Claude Code, Codex, Antigravity) hat einen eigenen
+# Abschnitt mit vier gleich aufgebauten Punkten: lokales Modell, Cloud-CLI
+# direkt ausführen, CLI installieren, Hilfe-Link.
 main_menu() {
-    local show_cloud=0
-
     while true; do
         clear
         printf '%s╔═══════════════════════════════════════════════════════════════════════╗%s\n' "$BOLD" "$RESET"
@@ -1812,29 +1896,40 @@ main_menu() {
 
         printf '\n%s Einrichtung%s\n' "$BOLD" "$RESET"
         printf '  [00] 🛠️  Alle Komponenten & Modelle prüfen / installieren\n'
-        printf '\n%s OpenCode starten%s\n' "$BOLD" "$RESET"
+
+        printf '\n%s Claude Code%s\n' "$BOLD" "$RESET"
         printf '  [01] 🟢 Mit lokalem Modell (kostenlos, privat, Datenschutz)\n'
-        printf '\n%s Codex starten%s\n' "$BOLD" "$RESET"
-        printf '  [02] 🟢 Mit lokalem Modell (kostenlos, privat, Datenschutz)\n'
-        printf '\n%s Claude Code starten%s\n' "$BOLD" "$RESET"
-        printf '  [03] 🟢 Mit lokalem Modell (kostenlos, privat, Datenschutz)\n'
-        if (( show_cloud )); then
-            printf '  [04] 🔴 Mit Claude-Abo (Cloud, Abo erforderlich)\n'
-            printf '  [05] 🔴 Mit Anthropic API-Key (Cloud, nutzungsabhängige Abrechnung)\n'
-        fi
+        printf '  [02] claude ausführen\n'
+        printf '  [03] CLI installieren\n'
+        printf '  [04] Hilfe\n'
+
+        printf '\n%s Codex%s\n' "$BOLD" "$RESET"
+        printf '  [05] 🟢 Mit lokalem Modell (kostenlos, privat, Datenschutz)\n'
+        printf '  [06] codex ausführen\n'
+        printf '  [07] CLI installieren\n'
+        printf '  [08] Hilfe\n'
+
+        printf '\n%s Antigravity%s\n' "$BOLD" "$RESET"
+        printf '  [09] agy ausführen\n'
+        printf '  [10] CLI installieren\n'
+        printf '  [11] Hilfe\n'
+
+        printf '\n%s OpenCode%s\n' "$BOLD" "$RESET"
+        printf '  [12] 🟢 Mit lokalem Modell (kostenlos, privat, Datenschutz)\n'
+
         printf '\n%s Ollama%s\n' "$BOLD" "$RESET"
-        printf '  [06] ▶️  Starten\n'
-        printf '  [07] 📥 Modell in den Speicher laden\n'
-        printf '  [08] ⏹️. Beenden (gibt allen Speicher frei)\n'
+        printf '  [13] ▶️  Starten\n'
+        printf '  [14] 📥 Modell in den Speicher laden\n'
+        printf '  [15] ⏹️. Beenden (gibt allen Speicher frei)\n'
         printf '\n%s Speicher%s\n' "$BOLD" "$RESET"
-        printf '  [09] 📊 Status: was liegt im Arbeitsspeicher\n'
-        printf '  [10] 🗑️  Einzelnes Modell aus dem Speicher werfen\n'
-        printf '  [11] 🧹 Alle Modelle aus dem Speicher werfen\n'
-        printf '  [12] 💿 Modelle auf der Festplatte ansehen\n'
-        printf '  [13] 🗑️  Modell von der Festplatte löschen\n'
+        printf '  [16] 📊 Status: was liegt im Arbeitsspeicher\n'
+        printf '  [17] 🗑️  Einzelnes Modell aus dem Speicher werfen\n'
+        printf '  [18] 🧹 Alle Modelle aus dem Speicher werfen\n'
+        printf '  [19] 💿 Modelle auf der Festplatte ansehen\n'
+        printf '  [20] 🗑️  Modell von der Festplatte löschen\n'
         printf '\n%s Wartung%s\n' "$BOLD" "$RESET"
-        printf '  [14] 🩺 Gesundheitscheck (doctor)\n'
-        printf '  [15] 🔄 ki.sh selbst aktualisieren\n'
+        printf '  [21] 🩺 Gesundheitscheck (doctor)\n'
+        printf '  [22] 🔄 ki.sh selbst aktualisieren\n'
         printf '\n  h  ℹ️  Info zu allen Komponenten & Modellen\n'
         printf '  q  ❌ Beenden\n\n'
 
@@ -1849,22 +1944,31 @@ main_menu() {
         case "$choice" in
             0|00) run_setup; press_enter ;;
 
-            1) run_opencode ;;
-            2) run_codex ;;
-            3) run_claude_local ;;
-            # Die Cloud-Punkte reagieren nur, wenn sie auch sichtbar sind.
-            4) (( show_cloud )) && run_claude_subscription ;;
-            5) (( show_cloud )) && run_claude_api ;;
+            1) run_claude_local ;;
+            2) run_claude_subscription ;;
+            3) install_claude_native; press_enter ;;
+            4) open_in_safari "https://code.claude.com/docs/en/quickstart"; press_enter ;;
 
-            6) start_ollama; press_enter ;;
-            7) local model
-               model="$(ask_for_model)" && load_model "$model"
-               press_enter ;;
-            8) stop_ollama; press_enter ;;
+            5) run_codex ;;
+            6) run_codex_cloud ;;
+            7) install_codex_native; press_enter ;;
+            8) open_in_safari "https://learn.chatgpt.com/docs/quickstart"; press_enter ;;
 
-            9) show_memory_status; press_enter ;;
+            9) run_antigravity ;;
+            10) install_antigravity_native; press_enter ;;
+            11) open_in_safari "https://antigravity.google/docs/getting-started"; press_enter ;;
 
-            10) # Ein Modell aus dem Arbeitsspeicher werfen.
+            12) run_opencode ;;
+
+            13) start_ollama; press_enter ;;
+            14) local model
+                model="$(ask_for_model)" && load_model "$model"
+                press_enter ;;
+            15) stop_ollama; press_enter ;;
+
+            16) show_memory_status; press_enter ;;
+
+            17) # Ein Modell aus dem Arbeitsspeicher werfen.
                 local ram_models=() ram_entry picked
                 while IFS= read -r ram_entry; do
                     [[ -n "$ram_entry" ]] && ram_models+=("$ram_entry")
@@ -1877,10 +1981,10 @@ main_menu() {
                 fi
                 press_enter ;;
 
-            11) free_memory; press_enter ;;
-            12) show_disk_models; press_enter ;;
+            18) free_memory; press_enter ;;
+            19) show_disk_models; press_enter ;;
 
-            13) # Ein Modell endgültig von der Festplatte löschen.
+            20) # Ein Modell endgültig von der Festplatte löschen.
                 local disk_models=() disk_entry picked
                 while IFS= read -r disk_entry; do
                     [[ -n "$disk_entry" ]] && disk_models+=("$disk_entry")
@@ -1893,12 +1997,10 @@ main_menu() {
                 fi
                 press_enter ;;
 
-            14) run_doctor; press_enter ;;
-            15) self_update; press_enter ;;
+            21) run_doctor; press_enter ;;
+            22) self_update; press_enter ;;
 
             h|H) show_info; press_enter ;;
-            # Versteckter Schalter für die beiden Cloud-Punkte.
-            C) (( show_cloud = !show_cloud )) ;;
             q|Q) exit 0 ;;
             *) ;;
         esac
@@ -1939,6 +2041,16 @@ case "${1:-menu}" in
     api|cloud)        shift || true; run_claude_api "$@" ;;
     opencode|oc)      shift || true; run_opencode "${1:-}" ;;
     codex)            shift || true; run_codex "${1:-}" ;;
+    codexcloud)       shift || true; run_codex_cloud "$@" ;;
+    agy)              shift || true; run_antigravity "$@" ;;
+
+    # --- CLI-Installer & Hilfe --------------------------------------------
+    install-claude)      install_claude_native ;;
+    install-codex)       install_codex_native ;;
+    install-agy)         install_antigravity_native ;;
+    help-claude)         open_in_safari "https://code.claude.com/docs/en/quickstart" ;;
+    help-codex)          open_in_safari "https://learn.chatgpt.com/docs/quickstart" ;;
+    help-agy)            open_in_safari "https://antigravity.google/docs/getting-started" ;;
 
     # --- Ollama steuern ---------------------------------------------------
     start|up)         start_ollama ;;
