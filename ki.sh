@@ -1577,6 +1577,12 @@ Ollama, Claude Code, OpenCode, Codex) und fehlende Modelle werden bei
 Bedarf automatisch installiert bzw. heruntergeladen (mit Rückfrage).
 Mit "-y" oder "--yes" laufen alle Rückfragen automatisch durch.
 
+${BOLD}Aufräumen${RESET}
+  ki clean                 Daten der KI-Agenten: Grösse, Baum, gezielt löschen
+  ki clean auto [tage] -y  Alles älter als N Tage löschen (Standard 14, für cron)
+  ki clean safe [agent]    Nur Gefahrloses löschen (Caches, Logs, Arbeitsdateien),
+                           z.B. "ki clean safe claude"; ohne Agent: alle
+
 ${BOLD}Einrichtung${RESET}
   ki setup [-y]             Alle Komponenten & Modelle prüfen/installieren
 
@@ -1864,6 +1870,403 @@ choose_from_list() {
     return 1
 }
 
+#-------------------------------------------------------------------------------
+# 15a. Aufräumen: von KI-Agenten erzeugte Daten von der Festplatte entfernen
+#-------------------------------------------------------------------------------
+#
+# Claude Code, Codex & Co. legen im Home-Verzeichnis Arbeitsdaten ab:
+# Hintergrund-Jobs, Gesprächsverläufe, Caches, erzeugte Bilder, VM-Images.
+# Das kann viele Gigabyte werden. Dieser Abschnitt zeigt pro Agent, was wie
+# viel Platz belegt, stellt es auf Wunsch als Baum dar und löscht gezielt.
+#
+# WAS BEWUSST NIE GELÖSCHT WIRD
+#
+#   Einstellungen, Logins, Skills, Plugins, Regeln (CLAUDE.md) und das
+#   Gedächtnis von Claude Code (projects/*/memory). Gelistet sind nur Daten,
+#   die sich neu erzeugen lassen oder reine Verlaufs-/Cache-Daten sind.
+#   Ollama-Modelle gehören nicht hierher (siehe "Modelle auf der Festplatte").
+#
+# Jeder Eintrag hat das Format:  Agent|Bezeichnung|Basispfad|Tiefe|Ausnahme|Art
+#
+#   Tiefe 0   der Basispfad selbst wird gelöscht (Datei oder Ordner)
+#   Tiefe N   alles, was genau N Ebenen unter dem Basispfad liegt
+#   Ausnahme  Name, der auf dieser Ebene NICHT gelöscht wird (leer = keine)
+#   Art       frei      gefahrlos: Cache, Log, Arbeitsdatei; entsteht bei Bedarf
+#                       neu, nichts Nutzbares geht verloren
+#             verlauf   alte Gespräche bzw. Rückgängig-Stände; danach lässt sich
+#                       ein altes Gespräch nicht mehr fortsetzen
+#             ergebnis  vom Agenten erzeugte Inhalte (Bilder, Notizen), die der
+#                       Benutzer vielleicht noch braucht
+#
+# Keine Art macht ein KI-System "schlechter": Die Modelle laufen beim Anbieter
+# und lernen nichts aus diesen Ordnern. Was die Arbeit beeinflusst (Regeln,
+# Gedächtnis, Einstellungen), steht bewusst nicht in dieser Liste.
+
+CLEAN_ENTRIES=(
+    "Claude Code|Hintergrund-Jobs (Arbeitsdateien)|$HOME/.claude/jobs|1||frei"
+    "Claude Code|Gesprächsverläufe (Gedächtnis bleibt)|$HOME/.claude/projects|2|memory|verlauf"
+    "Claude Code|Datei-Verlauf (Undo-Kopien)|$HOME/.claude/file-history|1||frei"
+    "Claude Code|Caches|$HOME/.claude/cache|1||frei"
+    "Claude Code|Zwischenablage-Cache|$HOME/.claude/paste-cache|1||frei"
+    "Claude Code|Shell-Schnappschüsse|$HOME/.claude/shell-snapshots|1||frei"
+    "Claude Code|Sitzungs-Umgebungen|$HOME/.claude/session-env|1||frei"
+    "Claude Code|CLI-Cache (Library)|$HOME/Library/Caches/claude-cli-nodejs|1||frei"
+    "Claude Desktop|VM-Images (werden bei Bedarf neu geladen)|$HOME/Library/Application Support/Claude/vm_bundles|1||frei"
+    "Claude Desktop|Browser-Caches|$HOME/Library/Application Support/Claude/Cache|1||frei"
+    "Claude Desktop|Code-Cache|$HOME/Library/Application Support/Claude/Code Cache|1||frei"
+    "Claude Desktop|Logs|$HOME/Library/Logs/Claude|1||frei"
+    "Codex|Sitzungen (Verlauf)|$HOME/.codex/sessions|1||verlauf"
+    "Codex|Archivierte Sitzungen|$HOME/.codex/archived_sessions|1||verlauf"
+    "Codex|Erzeugte Bilder|$HOME/.codex/generated_images|1||ergebnis"
+    "Codex|Visualisierungen|$HOME/.codex/visualizations|1||ergebnis"
+    "Codex|Temporäre Dateien|$HOME/.codex/.tmp|1||frei"
+    "Codex|Cache|$HOME/.codex/cache|1||frei"
+    "Codex|Log-Datenbank|$HOME/.codex/logs_2.sqlite|0||frei"
+    "OpenCode|Logs|$HOME/.local/share/opencode/log|1||frei"
+    "OpenCode|Snapshots|$HOME/.local/share/opencode/snapshot|1||verlauf"
+    "Gemini|Antigravity: Gespräche|$HOME/.gemini/antigravity/conversations|1||verlauf"
+    "Gemini|Antigravity: Brain (Arbeitsnotizen)|$HOME/.gemini/antigravity/brain|1||ergebnis"
+    "Gemini|Antigravity: Cache|$HOME/.gemini/antigravity/cache|1||frei"
+    "Gemini|Antigravity: Scratch|$HOME/.gemini/antigravity/scratch|1||frei"
+    "Gemini|Antigravity: Absturzberichte|$HOME/.gemini/antigravity/crashes|1||frei"
+    "Gemini|Antigravity-CLI: Gespräche|$HOME/.gemini/antigravity-cli/conversations|1||verlauf"
+    "Gemini|Antigravity-CLI: Brain|$HOME/.gemini/antigravity-cli/brain|1||ergebnis"
+    "Gemini|Antigravity-CLI: Cache|$HOME/.gemini/antigravity-cli/cache|1||frei"
+    "Gemini|Antigravity-CLI: Logs|$HOME/.gemini/antigravity-cli/log|1||frei"
+    "Gemini|Antigravity-App: Cache|$HOME/Library/Application Support/Antigravity/Cache|1||frei"
+    "Gemini|Antigravity-App: Code-Cache|$HOME/Library/Application Support/Antigravity/Code Cache|1||frei"
+    "Cursor|Caches|$HOME/Library/Application Support/Cursor/Cache|1||frei"
+    "Cursor|Code-Cache|$HOME/Library/Application Support/Cursor/CachedData|1||frei"
+    "Cursor|Logs|$HOME/Library/Application Support/Cursor/logs|1||frei"
+)
+
+# Standard-Alter in Tagen für das automatische Aufräumen ("ki clean auto").
+CLEAN_AUTO_DAYS=14
+
+# Mindestalter in Tagen für "gefahrlos löschen". Was jünger ist, gehört
+# vermutlich zu einer laufenden Sitzung (z.B. Hintergrund-Jobs von Claude Code)
+# und bleibt deshalb liegen.
+CLEAN_SAFE_MIN_DAYS=1
+
+# Kurzer Text zur Art eines Eintrags (Feld 6) für die Anzeige.
+clean_kind_label() {
+    case "$1" in
+        frei)     printf '%sgefahrlos%s' "$GREEN" "$RESET" ;;
+        verlauf)  printf '%sVerlauf%s' "$YELLOW" "$RESET" ;;
+        ergebnis) printf '%sErgebnis, prüfen%s' "$RED" "$RESET" ;;
+        *)        printf '?' ;;
+    esac
+}
+
+# Gibt die Namen aller Agenten in Listenreihenfolge aus, je einer pro Zeile.
+clean_agents() {
+    local entry agent last=""
+    for entry in "${CLEAN_ENTRIES[@]}"; do
+        agent="$(field "$entry" 1)"
+        [[ "$agent" == "$last" ]] && continue
+        printf '%s\n' "$agent"
+        last="$agent"
+    done
+}
+
+# Löscht alle gefahrlosen Einträge (Art "frei") eines Agenten oder aller
+# Agenten. Was jünger als CLEAN_SAFE_MIN_DAYS ist, bleibt liegen.
+#
+# Aufruf:  clean_safe [<agent>]   (Teil des Namens genügt, z.B. "codex";
+#                                  ohne Angabe: alle Agenten)
+# Rückgabe: 0 = gelöscht oder nichts zu tun, 1 = abgebrochen oder unbekannt
+clean_safe() {
+    local filter="${1:-}" filter_lc entry agent agent_lc kb total=0
+    filter_lc="$(printf '%s' "$filter" | tr '[:upper:]' '[:lower:]')"
+
+    local picked=() sizes=() matched=0
+    for entry in "${CLEAN_ENTRIES[@]}"; do
+        agent="$(field "$entry" 1)"
+        agent_lc="$(printf '%s' "$agent" | tr '[:upper:]' '[:lower:]')"
+        [[ -n "$filter_lc" && "$agent_lc" != *"$filter_lc"* ]] && continue
+        matched=1
+        [[ "$(field "$entry" 6)" == "frei" ]] || continue
+        kb="$(clean_size_kb "$(field "$entry" 3)" "$(field "$entry" 4)" "$(field "$entry" 5)" \
+            "$CLEAN_SAFE_MIN_DAYS")"
+        (( kb > 0 )) || continue
+        picked+=("$entry"); sizes+=("$kb")
+        total=$(( total + kb ))
+    done
+
+    if (( ! matched )); then
+        print_error "Unbekannter Agent: $filter. Bekannt sind:"
+        clean_agents | sed 's/^/  /' >&2
+        return 1
+    fi
+
+    print_heading "Gefahrlos löschen: ${filter:-alle KI-Systeme}"
+    printf 'Nur Caches, Logs und Arbeitsdateien. Gesprächsverläufe, erzeugte Bilder,\n'
+    printf 'Notizen, Einstellungen und Gedächtnis bleiben. Jünger als %s Tag(e) bleibt liegen.\n' \
+        "$CLEAN_SAFE_MIN_DAYS"
+
+    if (( ${#picked[@]} == 0 )); then
+        print_ok "Nichts Gefahrloses zum Löschen gefunden."
+        return 0
+    fi
+
+    local n
+    printf '\n'
+    for (( n = 0; n < ${#picked[@]}; n++ )); do
+        printf '  - %s / %s (%s)\n' "$(field "${picked[$n]}" 1)" "$(field "${picked[$n]}" 2)" \
+            "$(format_kb "${sizes[$n]}")"
+    done
+    printf '\n  Das gibt ca. %s%s%s frei.\n' "$BOLD" "$(format_kb "$total")" "$RESET"
+    clean_warn_running
+
+    if ! confirm_destructive "Jetzt löschen"; then
+        print_warning "Abgebrochen, nichts gelöscht."
+        return 1
+    fi
+
+    local fails
+    for entry in ${picked[@]+"${picked[@]}"}; do
+        clean_delete_entry "$(field "$entry" 3)" "$(field "$entry" 4)" "$(field "$entry" 5)" \
+            "$CLEAN_SAFE_MIN_DAYS"
+        fails=$?
+        if (( fails == 0 )); then
+            print_ok "$(field "$entry" 1) / $(field "$entry" 2) gelöscht"
+        else
+            print_warning "$(field "$entry" 2): $fails Pfad(e) nicht löschbar"
+        fi
+    done
+    return 0
+}
+
+# Gibt die Löschziele eines Eintrags NUL-getrennt aus (sicher bei Leerzeichen).
+#
+# Aufruf: clean_targets <basis> <tiefe> <ausnahme> [<älter-als-tage>]
+clean_targets() {
+    local base="$1" depth="$2" keep="${3:-}" days="${4:-0}"
+    [[ -e "$base" ]] || return 0
+
+    if [[ "$depth" == "0" ]]; then
+        # Nur die Datei bzw. den Ordner selbst - bei Altersfilter prüfen.
+        if (( days > 0 )) && [[ -z "$(find "$base" -maxdepth 0 -mtime +"$days" 2>/dev/null)" ]]; then
+            return 0
+        fi
+        printf '%s\0' "$base"
+        return 0
+    fi
+
+    local args=(-mindepth "$depth" -maxdepth "$depth")
+    [[ -n "$keep" ]] && args+=(! -name "$keep")
+    (( days > 0 )) && args+=(-mtime +"$days")
+    find "$base" ${args[@]+"${args[@]}"} -print0 2>/dev/null
+}
+
+# Belegter Platz aller Ziele eines Eintrags in Kilobyte.
+clean_size_kb() {
+    clean_targets "$@" | xargs -0 du -sk 2>/dev/null | awk '{s+=$1} END {print s+0}'
+}
+
+# Kilobyte als lesbare Grösse (KB/MB/GB).
+format_kb() {
+    awk -v kb="$1" 'BEGIN {
+        if (kb >= 1048576)   printf "%.1f GB", kb / 1048576
+        else if (kb >= 1024) printf "%.0f MB", kb / 1024
+        else                 printf "%d KB", kb
+    }'
+}
+
+# Schutz vor Unfällen: gelöscht wird nur tief unterhalb des Home-Ordners.
+clean_path_is_safe() {
+    local p="$1"
+    [[ -n "$HOME" && "$p" == "$HOME"/?*/?* ]] || return 1
+    case "$p" in *"/../"*|*"/..") return 1 ;; esac
+    return 0
+}
+
+# Löscht alle Ziele eines Eintrags. Gibt die Anzahl nicht löschbarer Pfade aus.
+clean_delete_entry() {
+    local base="$1" depth="$2" keep="$3" days="${4:-0}" target failed=0
+    while IFS= read -r -d '' target; do
+        if ! clean_path_is_safe "$target"; then
+            print_warning "Übersprungen (unsicherer Pfad): $target"
+            failed=$(( failed + 1 ))
+            continue
+        fi
+        rm -rf -- "$target" 2>/dev/null || failed=$(( failed + 1 ))
+    done < <(clean_targets "$base" "$depth" "$keep" "$days")
+    return "$failed"
+}
+
+# Zeigt die grössten Ziele eines Eintrags als Baum (zwei Ebenen).
+clean_show_tree() {
+    local label="$1" base="$2" depth="$3" keep="$4"
+    print_heading "Baum: $label"
+    printf '%s%s%s\n' "$DIM" "$base" "$RESET"
+
+    local kb path shown=0
+    while IFS=$'\t' read -r kb path; do
+        [[ -z "$path" ]] && continue
+        shown=$(( shown + 1 ))
+        printf '├── %-44s %10s\n' "${path#"$base"/}" "$(format_kb "$kb")"
+        if [[ -d "$path" && ! -L "$path" ]]; then
+            local ckb cpath
+            while IFS=$'\t' read -r ckb cpath; do
+                [[ -z "$cpath" || "$cpath" == "$path" ]] && continue
+                printf '│   └── %-40s %10s\n' "$(basename "$cpath")" "$(format_kb "$ckb")"
+            done < <(du -sk "$path"/* "$path"/.[!.]* 2>/dev/null | sort -rn | head -3)
+        fi
+    done < <(clean_targets "$base" "$depth" "$keep" | xargs -0 du -sk 2>/dev/null | sort -rn | head -12)
+
+    (( shown == 0 )) && printf '  (leer)\n'
+    return 0
+}
+
+# Warnt, wenn ein Agent noch läuft - dessen Daten sollten nicht gelöscht werden.
+clean_warn_running() {
+    local running
+    running="$(pgrep -lx 'claude|codex|opencode|cursor|Cursor' 2>/dev/null | awk '{print $2}' | sort -u | tr '\n' ' ')"
+    [[ -n "$running" ]] && print_warning "Laufende Agenten: $running- am besten erst beenden."
+    return 0
+}
+
+# Interaktives Aufräum-Menü mit Zahlenauswahl.
+clean_menu() {
+    while true; do
+        clear
+        print_heading "Aufräumen: von KI-Agenten erzeugte Daten"
+        printf 'Einstellungen, Logins, Skills, Plugins und Gedächtnis bleiben erhalten.\n'
+        printf 'Scanne ...\n'
+
+        # Nur Einträge mit Inhalt werden angeboten (parallele Arrays).
+        local idx=() sizes=() entry n=0 total=0 kb
+        for entry in "${CLEAN_ENTRIES[@]}"; do
+            kb="$(clean_size_kb "$(field "$entry" 3)" "$(field "$entry" 4)" "$(field "$entry" 5)")"
+            (( kb > 0 )) || continue
+            idx+=("$entry"); sizes+=("$kb")
+            total=$(( total + kb ))
+        done
+
+        clear
+        print_heading "Aufräumen: von KI-Agenten erzeugte Daten"
+        if (( ${#idx[@]} == 0 )); then
+            print_ok "Nichts zum Aufräumen gefunden."
+            return 0
+        fi
+
+        local last_agent="" agent
+        for (( n = 0; n < ${#idx[@]}; n++ )); do
+            agent="$(field "${idx[$n]}" 1)"
+            if [[ "$agent" != "$last_agent" ]]; then
+                printf '\n%s%s%s\n' "$BOLD" "$agent" "$RESET"
+                last_agent="$agent"
+            fi
+            printf '  [%2d] %10s  %-44s %s\n' "$(( n + 1 ))" "$(format_kb "${sizes[$n]}")" \
+                "$(field "${idx[$n]}" 2)" "$(clean_kind_label "$(field "${idx[$n]}" 6)")"
+        done
+        printf '\n  Gesamt: %s%s%s\n' "$BOLD" "$(format_kb "$total")" "$RESET"
+        printf '\n  gefahrlos  Cache/Log/Arbeitsdatei, entsteht neu, nichts geht verloren\n'
+        printf '  Verlauf    alte Gespräche/Rückgängig-Stände, danach nicht mehr fortsetzbar\n'
+        printf '  Ergebnis   erzeugte Bilder/Notizen, vorher ansehen (Baum)\n'
+        printf '  Keines davon macht ein KI-System schlechter.\n'
+
+        printf '\n  s  alles Gefahrlose (pro KI-System wählbar)   |   Zahlen  löschen, z.B. "1 3 5"\n'
+        printf '  a  alles   |   b  Baum ("b 2")   |   q  zurück\n'
+        local choice
+        read -r -p "> " choice < /dev/tty || return 0
+
+        local words=() w
+        # shellcheck disable=SC2206
+        words=($choice)
+        (( ${#words[@]} == 0 )) && continue
+
+        case "${words[0]}" in
+            q|Q) return 0 ;;
+            s|S)
+                local agents=() line
+                while IFS= read -r line; do agents+=("$line"); done < <(clean_agents)
+                printf '\nWelches KI-System?\n' >&2
+                local choice_agent
+                if choice_agent="$(choose_from_list "Alle KI-Systeme" "${agents[@]}")"; then
+                    [[ "$choice_agent" == "Alle KI-Systeme" ]] && choice_agent=""
+                    clean_safe "$choice_agent"
+                fi
+                press_enter
+                continue ;;
+            b|B)
+                local t="${words[1]:-}"
+                if is_number "$t" && (( t >= 1 && t <= ${#idx[@]} )); then
+                    entry="${idx[$(( t - 1 ))]}"
+                    clean_show_tree "$(field "$entry" 2)" "$(field "$entry" 3)" "$(field "$entry" 4)" "$(field "$entry" 5)"
+                else
+                    print_error "Bitte \"b <Nummer>\" angeben."
+                fi
+                press_enter
+                continue ;;
+        esac
+
+        # Auswahl in eine Liste gültiger Positionen übersetzen.
+        local picked=()
+        if [[ "${words[0]}" == "a" || "${words[0]}" == "A" ]]; then
+            for (( n = 0; n < ${#idx[@]}; n++ )); do picked+=("$n"); done
+        else
+            for w in "${words[@]}"; do
+                if is_number "$w" && (( w >= 1 && w <= ${#idx[@]} )); then
+                    picked+=("$(( w - 1 ))")
+                else
+                    print_error "Ungültig: $w"; picked=(); break
+                fi
+            done
+        fi
+        if (( ${#picked[@]} == 0 )); then press_enter; continue; fi
+
+        local sel_kb=0 p
+        printf '\nZum Löschen ausgewählt:\n'
+        for p in "${picked[@]}"; do
+            printf '  - %s / %s (%s)\n' "$(field "${idx[$p]}" 1)" "$(field "${idx[$p]}" 2)" "$(format_kb "${sizes[$p]}")"
+            sel_kb=$(( sel_kb + sizes[$p] ))
+        done
+        printf '\n  Das gibt ca. %s%s%s frei und ist NICHT rückgängig zu machen.\n' "$BOLD" "$(format_kb "$sel_kb")" "$RESET"
+        clean_warn_running
+
+        if confirm_destructive "Wirklich löschen"; then
+            local fails
+            for p in "${picked[@]}"; do
+                entry="${idx[$p]}"
+                clean_delete_entry "$(field "$entry" 3)" "$(field "$entry" 4)" "$(field "$entry" 5)"
+                fails=$?
+                if (( fails == 0 )); then
+                    print_ok "$(field "$entry" 1) / $(field "$entry" 2) gelöscht"
+                else
+                    print_warning "$(field "$entry" 2): $fails Pfad(e) nicht löschbar"
+                fi
+            done
+        else
+            print_warning "Abgebrochen, nichts gelöscht."
+        fi
+        press_enter
+    done
+}
+
+# Automatisches Aufräumen ohne Menü: löscht nur Ziele, die älter als <tage>
+# sind. Gedacht für launchd/cron, z.B. "ki clean auto 14 -y". Ohne "-y" und
+# ohne Terminal wird (wie bei allen Löschaktionen) nichts gelöscht.
+clean_auto() {
+    local days="${1:-$CLEAN_AUTO_DAYS}"
+    if ! is_number "$days" || (( days < 1 )); then
+        print_error "Tage muss eine Zahl >= 1 sein."
+        return 1
+    fi
+    confirm_destructive "Alles älter als $days Tage aus den Agenten-Ordnern löschen" || return 1
+
+    local entry total_kb=0 kb
+    for entry in "${CLEAN_ENTRIES[@]}"; do
+        kb="$(clean_size_kb "$(field "$entry" 3)" "$(field "$entry" 4)" "$(field "$entry" 5)" "$days")"
+        (( kb > 0 )) || continue
+        clean_delete_entry "$(field "$entry" 3)" "$(field "$entry" 4)" "$(field "$entry" 5)" "$days"
+        total_kb=$(( total_kb + kb ))
+        printf '  %s / %s: %s\n' "$(field "$entry" 1)" "$(field "$entry" 2)" "$(format_kb "$kb")"
+    done
+    print_ok "Aufgeräumt: ca. $(format_kb "$total_kb") frei (älter als $days Tage)."
+}
+
 # Das interaktive Hauptmenü. Läuft in einer Schleife, bis "q" gewählt wird
 # oder einer der Assistenten per "exec" übernimmt.
 #
@@ -1930,6 +2333,7 @@ main_menu() {
         printf '\n%s Wartung%s\n' "$BOLD" "$RESET"
         printf '  [21] 🩺 Gesundheitscheck (doctor)\n'
         printf '  [22] 🔄 ki.sh selbst aktualisieren\n'
+        printf '  [23] 🧹 Aufräumen: Daten der KI-Agenten von der Platte löschen\n'
         printf '\n  h  ℹ️  Info zu allen Komponenten & Modellen\n'
         printf '  q  ❌ Beenden\n\n'
 
@@ -1999,6 +2403,7 @@ main_menu() {
 
             21) run_doctor; press_enter ;;
             22) self_update; press_enter ;;
+            23) clean_menu ;;
 
             h|H) show_info; press_enter ;;
             q|Q) exit 0 ;;
@@ -2081,6 +2486,13 @@ case "${1:-menu}" in
 
     # --- Wartung ----------------------------------------------------------
     doctor)               run_doctor ;;
+    clean|cleanup|aufraeumen)
+                          shift || true
+                          case "${1:-menu}" in
+                              auto) shift || true; clean_auto "${1:-}" ;;
+                              safe|sicher) shift || true; clean_safe "${1:-}" ;;
+                              *)    clean_menu ;;
+                          esac ;;
     selfupdate|update-ki) self_update ;;
 
     # --- Hilfe ------------------------------------------------------------
