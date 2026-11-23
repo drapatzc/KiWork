@@ -1,0 +1,526 @@
+#!/bin/zsh
+# schalter – Mac einstellen und aufräumen, alles in einem Skript.
+#
+# Zwei Arten von Befehlen:
+#   Schalter  lassen sich ein- und ausschalten. Jeder liegt als eigene Datei in
+#             funktionen/<name>.sh. Neue entstehen mit "schalter neu <name>" aus der
+#             Vorlage funktionen/_vorlage.sh. Dateien mit führendem "_" zählen nicht.
+#   Aktionen  starten sofort (Xcode, Caches, Simulatoren, Mac). Sie stehen in
+#             lib/aktionen.sh und stammen aus dem früheren xcodeclean.sh.
+#
+# Das Menü zeigt links die Schalter mit [x]/[ ] und rechts die Aktionen mit Pfeil.
+
+emulate -L zsh
+setopt NO_NOMATCH EXTENDED_GLOB
+
+SKRIPT_DIR="${0:A:h}"
+FUNKTIONEN_DIR="$SKRIPT_DIR/funktionen"
+HILFEN="$SKRIPT_DIR/lib/hilfen.sh"
+AKTIONEN_DATEI="$SKRIPT_DIR/lib/aktionen.sh"
+
+# Reihenfolge der Gruppen in der linken Spalte. Unbekannte Gruppen folgen danach.
+GRUPPEN=(Entwickler Tastatur Finder Dock Bildschirmfotos Programme System)
+
+# Farben nur, wenn die Ausgabe ein Terminal ist.
+if [[ -t 1 ]]; then
+    GRUEN=$'\e[32m'; ROT=$'\e[31m'; GELB=$'\e[33m'; GRAU=$'\e[90m'
+    FETT=$'\e[1m'; INVERS=$'\e[7m'; ENDE=$'\e[0m'
+else
+    GRUEN=""; ROT=""; GELB=""; GRAU=""; FETT=""; INVERS=""; ENDE=""
+fi
+
+source "$AKTIONEN_DATEI"
+
+hilfe() {
+    cat <<EOF
+${FETT}schalter${ENDE} – Mac einstellen und aufräumen
+
+Aufruf:
+  schalter                     Menü: links Schalter, rechts Aktionen
+  schalter liste               Alle Schalter und Aktionen als Liste ausgeben
+
+Schalter (ein/aus):
+  schalter an <name>           einschalten
+  schalter aus <name>          ausschalten
+  schalter um <name>           umschalten
+  schalter zustand <name>      Zustand ausgeben (an/aus/–)
+  schalter neu <name>          neuen Schalter aus der Vorlage anlegen
+
+Aktionen (starten sofort):
+  schalter start <name>        Aktion ausführen, z. B. schalter start xcode-frisch
+  schalter start -j <name>     kritische Aktion ohne Rückfrage ausführen
+
+  schalter hilfe               Diese Hilfe
+
+Mehrere Namen sind erlaubt, z. B.: schalter aus ruhezustand bildschirm-ruhe
+Schalter liegen in: $FUNKTIONEN_DIR
+Aktionen stehen in: $AKTIONEN_DATEI
+EOF
+}
+
+# Gibt alle Schalternamen aus (Dateien ohne führenden Unterstrich).
+alle_funktionen() {
+    local datei
+    for datei in "$FUNKTIONEN_DIR"/[^_]*.sh(N); do
+        print -r -- "${datei:t:r}"
+    done
+}
+
+# Führt eine Aktion einer Schalterdatei in einer Subshell aus,
+# damit sich die Dateien nicht gegenseitig beeinflussen.
+#   $1 = Name, $2 = zustand | einschalten | ausschalten | beschreibung | alles
+#   "alles" gibt Gruppe, Beschreibung und Zustand aus, durch Tabulator getrennt.
+ausfuehren() {
+    local datei="$FUNKTIONEN_DIR/$1.sh"
+    if [[ ! -f $datei ]]; then
+        print -u2 "${ROT}Unbekannter Schalter:${ENDE} $1  (schalter liste zeigt alle)"
+        return 1
+    fi
+    (
+        source "$HILFEN"
+        source "$datei"
+        case $2 in
+            beschreibung) print -r -- "$BESCHREIBUNG" ;;
+            alles)        print -r -- "${GRUPPE:-Sonstiges}"$'\t'"$BESCHREIBUNG"$'\t'"$(zustand 2>/dev/null)" ;;
+            *)            "$2" ;;
+        esac
+    )
+}
+
+# Liest einen Eintrag aus AKTIONEN in a_gruppe, a_text, a_frage. 1 = unbekannt.
+aktion_feld() {
+    local e
+    local -a f
+    for e in $AKTIONEN; do
+        f=("${(@s:|:)e}")
+        if [[ ${f[1]} == $1 ]]; then
+            a_gruppe=${f[2]}; a_text=${f[3]}; a_frage=${f[4]}
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Führt eine Aktion in einer Subshell aus.
+aktion_starten() { ( "aktion_${1//-/_}" ) }
+
+zustand_farbig() {
+    case $1 in
+        an)  print -n "${GRUEN}an ${ENDE}" ;;
+        aus) print -n "${ROT}aus${ENDE}" ;;
+        *)   print -n "${GRAU}–  ${ENDE}" ;;
+    esac
+}
+
+liste() {
+    local name zustand e
+    local -a f
+    print "${FETT}Schalter                 Zustand  Beschreibung${ENDE}"
+    for name in $(alle_funktionen); do
+        zustand=$(ausfuehren "$name" zustand 2>/dev/null)
+        printf "%-24s " "$name"
+        zustand_farbig "$zustand"
+        print "      ${GRAU}$(ausfuehren "$name" beschreibung)${ENDE}"
+    done
+    print
+    print "${FETT}Aktion                   Gruppe        Beschreibung${ENDE}"
+    for e in $AKTIONEN; do
+        f=("${(@s:|:)e}")
+        printf "%-24s %-13s ${GRAU}%s${ENDE}%s\n" "${f[1]}" "${f[2]}" "${f[3]}" \
+            "${f[4]:+  (fragt vorher nach)}"
+    done
+}
+
+setzen() {
+    local ziel=$1; shift
+    local name aktuell aktion ziel_jetzt
+    [[ $# -eq 0 ]] && { print -u2 "Bitte mindestens einen Schalternamen angeben."; return 1 }
+    for name in "$@"; do
+        aktuell=$(ausfuehren "$name" zustand 2>/dev/null) || { ausfuehren "$name" zustand; continue }
+        if [[ $aktuell == "–" ]]; then
+            print "$name: auf diesem Mac nicht verfügbar"
+            continue
+        fi
+        if [[ $ziel == um ]]; then
+            [[ $aktuell == an ]] && ziel_jetzt=aus || ziel_jetzt=an
+        else
+            ziel_jetzt=$ziel
+        fi
+        if [[ $aktuell == $ziel_jetzt ]]; then
+            print "$name: ist bereits $(zustand_farbig $ziel_jetzt)"
+            continue
+        fi
+        [[ $ziel_jetzt == an ]] && aktion=einschalten || aktion=ausschalten
+        if ausfuehren "$name" "$aktion"; then
+            print "$name: jetzt $(zustand_farbig "$(ausfuehren "$name" zustand 2>/dev/null)")"
+        else
+            print -u2 "${ROT}$name: Umschalten fehlgeschlagen${ENDE}"
+        fi
+    done
+}
+
+# Aktionen von der Kommandozeile starten. Kritische fragen nach, außer mit -j.
+starten() {
+    local ja=0 name a_gruppe a_text a_frage
+    [[ $1 == (-j|-y) ]] && { ja=1; shift }
+    [[ $# -eq 0 ]] && { print -u2 "Aufruf: schalter start [-j] <aktion>  (schalter liste zeigt alle)"; return 1 }
+    for name in "$@"; do
+        if ! aktion_feld "$name"; then
+            print -u2 "${ROT}Unbekannte Aktion:${ENDE} $name  (schalter liste zeigt alle)"
+            return 1
+        fi
+        if [[ -n $a_frage ]] && (( ! ja )); then
+            print "${FETT}$a_text${ENDE}"
+            print -r -- "$a_frage"
+            bestaetigen "Ausführen?" || continue
+        fi
+        aktion_starten "$name"
+    done
+}
+
+neu() {
+    local name=$1
+    [[ -z $name ]] && { print -u2 "Aufruf: schalter neu <name>"; return 1 }
+    [[ $name == [a-z0-9-]## ]] || { print -u2 "Name nur aus a-z, 0-9 und - bilden."; return 1 }
+    local ziel="$FUNKTIONEN_DIR/$name.sh"
+    [[ -e $ziel ]] && { print -u2 "Gibt es schon: $ziel"; return 1 }
+    cp "$FUNKTIONEN_DIR/_vorlage.sh" "$ziel"
+    print "Angelegt: $ziel"
+    print "Jetzt GRUPPE, BESCHREIBUNG, zustand, einschalten und ausschalten ausfüllen."
+}
+
+# --- Interaktives Menü -------------------------------------------------------
+# Das Menü läuft im zweiten Bildschirmpuffer des Terminals und wird immer an
+# festen Positionen gezeichnet. Dadurch steht es fest oben und rutscht nie.
+# Passen nicht alle Zeilen ins Fenster, rollt nur der Inhalt der Spalte.
+#
+# Spalte 1 = Schalter, Spalte 2 = Aktionen. Je Spalte drei gleich lange Arrays:
+#   typN   g = Gruppenüberschrift, e = Eintrag
+#   textN  angezeigter Text
+#   refN   Spalte 1: Index in namen/zustaende, Spalte 2: Name der Aktion
+# Die Funktionen nutzen die lokalen Variablen von menue() (dynamischer
+# Gültigkeitsbereich in zsh).
+
+# Zeilenumbruch nach Wörtern. $1 = Text, $2 = Breite. Ergebnis im Array reply.
+umbrechen() {
+    local wort zeile=""
+    reply=()
+    for wort in ${=1}; do
+        if [[ -z $zeile ]]; then
+            zeile=$wort
+        elif (( ${#zeile} + 1 + ${#wort} <= $2 )); then
+            zeile+=" $wort"
+        else
+            reply+=("$zeile"); zeile=$wort
+        fi
+    done
+    [[ -n $zeile ]] && reply+=("$zeile")
+}
+
+# Liest eine Taste nach "taste". Pfeiltasten kommen als ESC[A usw.
+# Meldet RESIZE, wenn sich die Fenstergröße geändert hat. 1 = Terminal weg.
+taste_lesen() {
+    local rest gr
+    while true; do
+        if read -rsk1 -t 1 taste; then
+            if [[ $taste == $'\e' ]]; then
+                rest=""
+                read -rsk2 -t 0.05 rest
+                taste="ESC$rest"
+            fi
+            return 0
+        fi
+        gr=$(stty size </dev/tty 2>/dev/null) || return 1
+        if [[ $gr != "$H $W" ]]; then taste=RESIZE; return 0; fi
+    done
+}
+
+# Liest den Zustand aller Schalter neu ein.
+menue_laden() {
+    local i
+    for i in {1..${#namen}}; do
+        zustaende[i]=$(ausfuehren "${namen[i]}" zustand 2>/dev/null)
+    done
+}
+
+# Baut die beiden Spalten auf.
+menue_aufbauen() {
+    local i g e teile
+    local -a gruppen beschr alle_gruppen f
+    for i in {1..${#namen}}; do
+        teile=("${(@ps:\t:)$(ausfuehren "${namen[i]}" alles)}")
+        gruppen[i]=${teile[1]}; beschr[i]=${teile[2]}; zustaende[i]=${teile[3]}
+    done
+    alle_gruppen=($GRUPPEN)
+    for g in ${(u)gruppen}; do
+        (( ${alle_gruppen[(Ie)$g]} )) || alle_gruppen+=("$g")
+    done
+    for g in $alle_gruppen; do
+        (( ${gruppen[(Ie)$g]} )) || continue
+        typ1+=(g); text1+=("$g"); ref1+=(0)
+        # Innerhalb der Gruppe nach Beschreibung sortieren.
+        for i in ${(on)$(for i in {1..${#namen}}; do
+                             [[ ${gruppen[i]} == $g ]] && print -r -- "${(L)beschr[i]// /_}:$i"
+                         done)}; do
+            i=${i##*:}
+            typ1+=(e); text1+=("${beschr[i]}"); ref1+=($i)
+        done
+    done
+    g=""
+    for e in $AKTIONEN; do
+        f=("${(@s:|:)e}")
+        if [[ ${f[2]} != $g ]]; then
+            g=${f[2]}
+            typ2+=(g); text2+=("$g"); ref2+=(""); frage2+=("")
+        fi
+        typ2+=(e); text2+=("${f[3]}"); ref2+=("${f[1]}"); frage2+=("${f[4]}")
+    done
+    pos=(${typ1[(i)e]} ${typ2[(i)e]})
+    off=(0 0)
+}
+
+# Bewegt den Zeiger der aktiven Spalte um $1 (+1/-1), überspringt Überschriften.
+menue_bewegen() {
+    local tn="typ$spalte" p=${pos[spalte]} n
+    n=${#${(@P)tn}}
+    while true; do
+        (( p += $1 ))
+        (( p < 1 )) && p=$n
+        (( p > n )) && p=1
+        [[ ${${(@P)tn}[p]} == e ]] && break
+    done
+    pos[spalte]=$p
+}
+
+# Wechselt die Spalte und bleibt möglichst auf derselben Bildschirmzeile.
+menue_spalte_wechseln() {
+    local alt=$spalte neu=$(( 3 - spalte )) tn p n
+    tn="typ$neu"
+    n=${#${(@P)tn}}
+    (( p = off[neu] + pos[alt] - off[alt] ))
+    (( p < 1 )) && p=1
+    (( p > n )) && p=$n
+    while (( p <= n )) && [[ ${${(@P)tn}[p]} != e ]]; do (( p++ )); done
+    while (( p > n || p < 1 )) || [[ ${${(@P)tn}[p]} != e ]]; do (( p-- )); done
+    pos[neu]=$p
+    spalte=$neu
+}
+
+# Hält den Zeiger der Spalte $1 im sichtbaren Bereich (V Zeilen).
+menue_anpassen() {
+    local s=$1 tn="typ$1" p o n
+    p=${pos[s]}; o=${off[s]}
+    n=${#${(@P)tn}}
+    (( p <= o )) && (( o = p - 1 ))
+    (( p > o + V )) && (( o = p - V ))
+    # Überschrift direkt über dem ersten sichtbaren Eintrag mitzeigen.
+    if (( o > 0 && o == p - 1 )) && [[ ${${(@P)tn}[p-1]} == g ]]; then (( o = p - 2 )); fi
+    (( o > n - V )) && (( o = n - V ))
+    (( o < 0 )) && o=0
+    off[s]=$o
+}
+
+# Baut eine Zelle. $1 = Spalte, $2 = Index, $3 = Breite. Ergebnis in REPLY.
+menue_zelle() {
+    local s=$1 i=$2 w=$3 tn="typ$1" xn="text$1" rn="ref$1"
+    local t x r aktiv=0 zeiger=" " marke rumpf
+    t=${${(@P)tn}[i]}
+    if [[ -z $t ]] || (( i < 1 )); then
+        REPLY=${(l:$w:):-}
+        return
+    fi
+    x=${${(@P)xn}[i]}
+    r=${${(@P)rn}[i]}
+    if [[ $t == g ]]; then
+        REPLY="${FETT}${(r:$w:)x}${ENDE}"
+        return
+    fi
+    (( s == spalte && i == pos[s] )) && { aktiv=1; zeiger="›" }
+    if (( s == 1 )); then
+        case ${zustaende[r]} in
+            an)  marke="${GRUEN}[x]${ENDE}" ;;
+            aus) marke="[ ]" ;;
+            *)   marke="${GRAU}[-]${ENDE}" ;;
+        esac
+    else
+        [[ -n ${frage2[i]} ]] && marke="${GELB}→ !${ENDE}" || marke="→  "
+    fi
+    rumpf=${(r:$(( w - 6 )):)x}
+    if (( aktiv )); then
+        REPLY="${FETT}${zeiger}${ENDE} ${marke} ${INVERS}${rumpf}${ENDE}"
+    else
+        REPLY="${zeiger} ${marke} ${rumpf}"
+    fi
+}
+
+# Zeichnet das ganze Menü an festen Positionen. voll=1 löscht vorher alles.
+menue_zeichnen() {
+    local gr zeile out="" wl wr i l r kopf_l kopf_r fuss_l fuss_r n1=${#typ1} n2=${#typ2}
+    gr=($(stty size </dev/tty 2>/dev/null))
+    H=${gr[1]:-24}; W=${gr[2]:-80}
+    (( V = H - 6 )); (( V < 3 )) && V=3
+    (( wl = (W - 3) / 2 )); (( wr = W - 3 - wl ))
+    menue_anpassen 1; menue_anpassen 2
+    (( voll )) && out+=$'\e[2J'
+    voll=0
+
+    out+=$'\e[1;1H'"${FETT}schalter${ENDE} – Mac einstellen und aufräumen"$'\e[K'
+    out+=$'\e[2;1H'"${GRAU}↑↓ wählen · ←→ Spalte · Return ausführen · r neu laden · q beenden${ENDE}"$'\e[K'
+    out+=$'\e[3;1H\e[K'
+
+    kopf_l="Ein/Aus"; kopf_r="Sofort starten"
+    (( off[1] > 0 )) && kopf_l+="  ▲"
+    (( off[2] > 0 )) && kopf_r+="  ▲"
+    out+=$'\e[4;1H'"${FETT}${(r:$wl:)kopf_l}${ENDE} ${GRAU}│${ENDE} ${FETT}${kopf_r}${ENDE}"$'\e[K'
+
+    for (( zeile = 1; zeile <= V; zeile++ )); do
+        menue_zelle 1 $(( off[1] + zeile )) $wl; l=$REPLY
+        menue_zelle 2 $(( off[2] + zeile )) $wr; r=$REPLY
+        out+=$'\e['"$(( zeile + 4 ))"';1H'"${l} ${GRAU}│${ENDE} ${r}"$'\e[K'
+    done
+
+    fuss_l=""; fuss_r=""
+    (( off[1] + V < n1 )) && fuss_l="  ▼ weitere"
+    (( off[2] + V < n2 )) && fuss_r="  ▼ weitere"
+    out+=$'\e['"$(( V + 5 ))"';1H'"${GRAU}${(r:$wl:)fuss_l} │ ${fuss_r}${ENDE}"$'\e[K'
+
+    out+=$'\e['"$(( V + 6 ))"';1H'
+    if [[ -n $meldung ]]; then
+        out+="$meldung"
+    else
+        out+="${GRAU}[x] an  [ ] aus  [-] nicht verfügbar  ·  → startet sofort  ·  ${ENDE}${GELB}→ !${ENDE}${GRAU} fragt vorher${ENDE}"
+    fi
+    out+=$'\e[K'
+    print -rn -- "$out"
+}
+
+# Dialog über dem Menü. $1 = Titel, $2 = Frage. 0 = ausführen, 1 = abbrechen.
+menue_dialog() {
+    local titel=$1 wahl=1 bw innen oben links z knoepfe k1 k2 rand taste i
+    local -a zeilen
+    (( bw = W - 4 )); (( bw > 62 )) && bw=62; (( bw < 30 )) && bw=30
+    (( innen = bw - 4 ))
+    umbrechen "$2" $innen
+    zeilen=("${reply[@]}")
+    (( oben = (H - ${#zeilen} - 7) / 2 + 1 )); (( oben < 1 )) && oben=1
+    (( links = (W - bw) / 2 + 1 )); (( links < 1 )) && links=1
+    rand=${(l:$(( bw - 2 ))::─:):-}
+    while true; do
+        if (( wahl == 1 )); then
+            k1="${INVERS}[ Abbrechen ]${ENDE}"; k2="[ Ausführen ]"
+        else
+            k1="[ Abbrechen ]"; k2="${INVERS}${FETT}[ Ausführen ]${ENDE}"
+        fi
+        z=$oben
+        knoepfe=""
+        knoepfe+=$'\e['"$z;${links}H${GELB}┌${rand}┐${ENDE}"; (( z++ ))
+        knoepfe+=$'\e['"$z;${links}H${GELB}│${ENDE} ${FETT}${(r:$innen:)titel}${ENDE} ${GELB}│${ENDE}"; (( z++ ))
+        knoepfe+=$'\e['"$z;${links}H${GELB}│${ENDE} ${(l:$innen:):-} ${GELB}│${ENDE}"; (( z++ ))
+        for i in {1..${#zeilen}}; do
+            knoepfe+=$'\e['"$z;${links}H${GELB}│${ENDE} ${(r:$innen:)zeilen[i]} ${GELB}│${ENDE}"; (( z++ ))
+        done
+        knoepfe+=$'\e['"$z;${links}H${GELB}│${ENDE} ${(l:$innen:):-} ${GELB}│${ENDE}"; (( z++ ))
+        knoepfe+=$'\e['"$z;${links}H${GELB}│${ENDE} ${k1}   ${k2}${(l:$(( innen - 29 )):):-} ${GELB}│${ENDE}"; (( z++ ))
+        knoepfe+=$'\e['"$z;${links}H${GELB}│${ENDE} ${GRAU}${(r:$innen:):-←→ wählen · Return bestätigen · Esc abbrechen}${ENDE} ${GELB}│${ENDE}"; (( z++ ))
+        knoepfe+=$'\e['"$z;${links}H${GELB}└${rand}┘${ENDE}"
+        print -rn -- "$knoepfe"
+        taste_lesen || return 1
+        case $taste in
+            'ESC[C'|'ESCOC'|'ESC[D'|'ESCOD'|$'\t'|h|l) (( wahl = 3 - wahl )) ;;
+            $'\n'|$'\r'|' ')  (( wahl == 2 )) && return 0 || return 1 ;;
+            j|J|y|Y)          return 0 ;;
+            ESC|q|Q|n|N|a|A)  return 1 ;;
+            RESIZE)           return 1 ;;
+        esac
+    done
+}
+
+# Schaltet den Schalter unter dem Zeiger um. sudo fragt bei Bedarf in der
+# untersten Zeile nach dem Passwort.
+menue_umschalten() {
+    local i=${ref1[pos[1]]} text=${text1[pos[1]]}
+    local name=${namen[i]} vorher=${zustaende[i]} ausgabe nachher
+    if [[ $vorher != (an|aus) ]]; then
+        meldung="$text: auf diesem Mac nicht verfügbar"
+        return
+    fi
+    print -n $'\e['"$(( V + 6 ))"$';1H\e[K\e[?7h\e[?25h'"Schalte um: $text … "
+    ausgabe=$(setzen um "$name" 2>&1)
+    print -n $'\e[?25l\e[?7l'
+    nachher=$(ausfuehren "$name" zustand 2>/dev/null)
+    zustaende[i]=$nachher
+    if [[ $nachher != $vorher ]]; then
+        [[ $nachher == an ]] && meldung="$text: jetzt ${GRUEN}an${ENDE}" || meldung="$text: jetzt ${ROT}aus${ENDE}"
+    else
+        ausgabe=${ausgabe//$'\e'\[[0-9;]#m/}
+        meldung="${ROT}Nicht umgeschaltet:${ENDE} $text  ${GRAU}${${(f)ausgabe}[-1]}${ENDE}"
+    fi
+    voll=1
+}
+
+# Startet die Aktion unter dem Zeiger. Kritische fragen vorher im Dialog.
+# Die Ausgabe erscheint auf einer eigenen Seite, danach kommt das Menü zurück.
+menue_starten() {
+    local i=${pos[2]}
+    local name=${ref2[i]} text=${text2[i]} frage=${frage2[i]}
+    if [[ -n $frage ]]; then
+        if ! menue_dialog "$text" "$frage"; then
+            meldung="Abgebrochen: $text"
+            voll=1
+            return
+        fi
+    fi
+    print -n $'\e[?7h\e[?25h\e[H\e[2J'
+    print "${FETT}$text${ENDE}"
+    print
+    aktion_starten "$name"
+    print
+    print -n "${GRAU}Fertig. Zurück zum Menü mit einer beliebigen Taste …${ENDE}"
+    read -rsk1
+    print -n $'\e[?25l\e[?7l'
+    meldung="Ausgeführt: $text"
+    voll=1
+}
+
+menue() {
+    local -a namen zustaende typ1 text1 ref1 typ2 text2 ref2 frage2 pos off
+    local spalte=1 taste meldung="" voll=1 H=0 W=0 V=3
+    namen=($(alle_funktionen))
+    (( ${#namen} == 0 )) && { print "Keine Schalter in $FUNKTIONEN_DIR"; return 1 }
+    {
+        # Zweiter Bildschirmpuffer, Zeiger aus, kein automatischer Zeilenumbruch.
+        print -n $'\e[?1049h\e[?25l\e[?7l\e[H\e[2J'
+        print -n "Lade Zustände …"
+        menue_aufbauen
+        while true; do
+            menue_zeichnen
+            taste_lesen || break
+            case $taste in
+                'ESC[A'|'ESCOA'|k) menue_bewegen -1; meldung="" ;;
+                'ESC[B'|'ESCOB'|j) menue_bewegen 1;  meldung="" ;;
+                'ESC[C'|'ESCOC'|'ESC[D'|'ESCOD'|$'\t'|h|l) menue_spalte_wechseln; meldung="" ;;
+                $'\n'|$'\r'|' ')   (( spalte == 1 )) && menue_umschalten || menue_starten ;;
+                r|R)               print -n $'\e['"$(( V + 6 ))"$';1H\e[KLade Zustände …'
+                                   menue_laden; meldung="Neu geladen." ;;
+                RESIZE)            voll=1 ;;
+                q|Q|ESC)           break ;;
+            esac
+        done
+    } always {
+        print -n $'\e[?7h\e[?25h\e[?1049l'
+    }
+}
+
+case ${1:-menue} in
+    menue|menu)          if [[ -t 0 && -t 1 ]]; then menue; else liste; fi ;;
+    liste|ls)            liste ;;
+    an|ein|on)           shift; setzen an "$@" ;;
+    aus|off)             shift; setzen aus "$@" ;;
+    um|umschalten|toggle) shift; setzen um "$@" ;;
+    zustand|status)      shift
+                         for n in "$@"; do z=$(ausfuehren "$n" zustand) && print "$n: $z"; done ;;
+    start|starte|run)    shift; starten "$@" ;;
+    neu|new)             shift; neu "$1" ;;
+    hilfe|help|-h|--help) hilfe ;;
+    *)                   print -u2 "Unbekannter Befehl: $1"; hilfe; exit 1 ;;
+esac

@@ -1,0 +1,465 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+testflight – baut die ausgewählten Apps und lädt sie zu TestFlight hoch.
+
+Aufruf:
+    ./testflight            Menü starten
+    ./testflight --pruefen  nur prüfen (Zugangsdaten, Projekte, Schemes), nichts bauen
+
+Tasten im Menü:
+    Pfeil hoch/runter  App anwählen
+    Leertaste          App selektieren / deselektieren
+    S                  alle selektieren
+    D                  alle deselektieren
+    W                  selektierte Apps bauen und zu TestFlight schicken
+    Q                  beenden
+Im Statusbericht:
+    X                  zurück ins Menü
+Während des Laufs:
+    Ctrl-C             Lauf abbrechen (Rest wird als abgebrochen gemeldet)
+
+Zugangsdaten: Ordner "~/GIT-Home/Apple-Schlüssel". Die Apps liegen ebenfalls in ~/GIT-Home. Die Issuer-ID wird aus
+Wichtig-AppConnectDaten.md gelesen, die Key-ID aus dem Dateinamen AuthKey_<ID>.p8.
+Beide Werte werden nie ausgegeben und nie in Protokolle geschrieben.
+
+Build-Nummer: Xcode erhöht sie beim Upload selbst, wenn die Nummer aus dem Projekt
+in App Store Connect schon vergeben ist (manageAppVersionAndBuildNumber).
+
+Protokolle und Statusbericht: Ordner "testflight-logs/<Zeitstempel>/" neben dem Skript.
+Archive: ~/Library/Developer/Xcode/Archives/<Datum>/ (im Xcode-Organizer sichtbar).
+"""
+
+import curses
+import datetime
+import glob
+import locale
+import os
+import plistlib
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+# Ordner des Skripts (für die Protokolle) und Ordner mit Apps und Schlüsseln.
+SKRIPT_ORDNER = os.path.dirname(os.path.abspath(__file__))
+BASIS = os.path.expanduser("~/GIT-Home")
+SCHLUESSEL_ORDNER = os.path.join(BASIS, "Apple-Schlüssel")
+ISSUER_DATEI = os.path.join(SCHLUESSEL_ORDNER, "Wichtig-AppConnectDaten.md")
+LOG_BASIS = os.path.join(SKRIPT_ORDNER, "testflight-logs")
+ARCHIV_BASIS = os.path.expanduser("~/Library/Developer/Xcode/Archives")
+
+IOS = "generic/platform=iOS"
+MAC = "generic/platform=macOS"
+
+# Anzeigename, Ordner, Xcode-Projekt, Liste (Plattform, Scheme, Ziel).
+# Watch-Apps und Widgets stecken im iOS-Scheme und werden mit hochgeladen.
+# Eine Plattform, die nicht hochgeladen werden soll, einfach aus der Liste nehmen.
+APPS = [
+    ("onetwoSKi", "onetwoski", "OneTwoSki.xcodeproj",
+     [("iOS", "OneTwoSki", IOS)]),
+    ("onetwotrails", "onetwotrails", "OneTwoTrails.xcodeproj",
+     [("iOS", "OneTwoTrails", IOS)]),
+    ("onetwoEditor", "onetwoeditor", "OneTwoEditor.xcodeproj",
+     [("iOS", "OneTwoEditor", IOS), ("macOS", "OneTwoEditorMac", MAC)]),
+    ("onetwoNotes", "onetwonotes", "OneTwoNotes.xcodeproj",
+     [("iOS", "OneTwoNotes", IOS), ("macOS", "OneTwoNotesMac", MAC)]),
+    ("onetwotodo", "onetwotodo", "OneTwoTodo.xcodeproj",
+     [("iOS", "OneTwoTodo", IOS), ("macOS", "OneTwoTodoMac", MAC)]),
+    ("onetwopassword", "onetwopassword", "OneTwoPassword.xcodeproj",
+     [("iOS", "OneTwoPassword", IOS), ("macOS", "OneTwoPasswordMac", MAC)]),
+    ("MeinhaushaltsbuchSwift", "MeinHaushaltsbuchSwift", "MeinHaushaltsbuch.xcodeproj",
+     [("iOS", "MeinHaushaltsbuch", IOS), ("macOS", "MeinHaushaltsbuchMac", MAC)]),
+    ("NavigateBack", "BringMeBack", "SpotBack.xcodeproj",
+     [("iOS", "SpotBack", IOS), ("macOS", "SpotBackMac", MAC)]),
+    ("onetwoScanner", "onetwoscan", "OneTwoScanner.xcodeproj",
+     [("iOS", "OneTwoScanner", IOS)]),
+]
+
+OK, FEHLER, ABBRUCH, OFFEN, LAEUFT = "OK", "FEHLER", "ABGEBROCHEN", "wartet", "läuft"
+
+
+class Zugang:
+    """Zugangsdaten für App Store Connect, erst zur Laufzeit aus dem Ordner gelesen."""
+
+    def __init__(self):
+        schluessel = sorted(glob.glob(os.path.join(SCHLUESSEL_ORDNER, "AuthKey_*.p8")))
+        if not schluessel:
+            raise RuntimeError("Keine AuthKey_*.p8 im Ordner Apple-Schlüssel gefunden.")
+        self.p8 = schluessel[0]
+        self.key_id = os.path.basename(self.p8)[len("AuthKey_"):-len(".p8")]
+        try:
+            with open(ISSUER_DATEI, encoding="utf-8") as datei:
+                text = datei.read()
+        except OSError:
+            raise RuntimeError("Wichtig-AppConnectDaten.md im Ordner Apple-Schlüssel nicht lesbar.")
+        treffer = re.search(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", text)
+        if not treffer:
+            raise RuntimeError("Keine Issuer-ID in Wichtig-AppConnectDaten.md gefunden.")
+        self.issuer = treffer.group(0)
+
+    def argumente(self):
+        return ["-allowProvisioningUpdates",
+                "-authenticationKeyPath", self.p8,
+                "-authenticationKeyID", self.key_id,
+                "-authenticationKeyIssuerID", self.issuer]
+
+    def maskiert(self, befehl):
+        return " ".join("***" if teil in (self.key_id, self.issuer, self.p8) else teil for teil in befehl)
+
+
+def projekt_pfad(app):
+    return os.path.join(BASIS, app[1], app[2])
+
+
+def app_hinweis(app):
+    """Kurzer Warnhinweis für die Menüzeile, leer wenn alles passt."""
+    projekt = projekt_pfad(app)
+    if not os.path.isdir(projekt):
+        return "Projekt fehlt"
+    for _, scheme, _ in app[3]:
+        if not os.path.isfile(os.path.join(projekt, "xcshareddata", "xcschemes", scheme + ".xcscheme")):
+            return "Scheme %s fehlt" % scheme
+    yml = os.path.join(BASIS, app[1], "project.yml")
+    pbx = os.path.join(projekt, "project.pbxproj")
+    if os.path.isfile(yml) and os.path.isfile(pbx) and os.path.getmtime(yml) > os.path.getmtime(pbx):
+        return "project.yml neuer als Xcode-Projekt"
+    return ""
+
+
+def dauer_text(sekunden):
+    sekunden = int(sekunden)
+    return "%d:%02d" % (sekunden // 60, sekunden % 60)
+
+
+def log_ende(pfad, zeilen):
+    """Liefert die letzten nicht leeren Zeilen eines Protokolls."""
+    try:
+        with open(pfad, "rb") as datei:
+            datei.seek(0, os.SEEK_END)
+            datei.seek(max(0, datei.tell() - 8192))
+            text = datei.read().decode("utf-8", "replace")
+    except OSError:
+        return []
+    return [z.rstrip() for z in text.splitlines() if z.strip()][-zeilen:]
+
+
+def fehler_aus_log(pfad):
+    """Sucht die aussagekräftigsten Fehlerzeilen im Protokoll."""
+    gefunden = []
+    try:
+        with open(pfad, encoding="utf-8", errors="replace") as datei:
+            for zeile in datei:
+                zeile = zeile.strip()
+                if re.search(r"\berror\b[: ]|ERROR ITMS|\*\* \w+ FAILED \*\*", zeile) and zeile not in gefunden:
+                    gefunden.append(zeile)
+    except OSError:
+        pass
+    if not gefunden:
+        gefunden = log_ende(pfad, 2)
+    return gefunden[-3:] or ["Unbekannter Fehler, siehe Protokoll."]
+
+
+def archiv_version(archiv):
+    try:
+        with open(os.path.join(archiv, "Info.plist"), "rb") as datei:
+            daten = plistlib.load(datei).get("ApplicationProperties", {})
+        return "%s (%s)" % (daten.get("CFBundleShortVersionString", "?"), daten.get("CFBundleVersion", "?"))
+    except (OSError, ValueError):
+        return ""
+
+
+class Lauf:
+    """Ein kompletter Durchgang über alle selektierten Apps."""
+
+    def __init__(self, bild, zugang, auswahl):
+        self.bild = bild
+        self.zugang = zugang
+        self.stempel = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self.log_ordner = os.path.join(LOG_BASIS, self.stempel)
+        os.makedirs(self.log_ordner, exist_ok=True)
+        self.export_plist = os.path.join(self.log_ordner, "ExportOptions.plist")
+        with open(self.export_plist, "wb") as datei:
+            plistlib.dump({
+                "method": "app-store-connect",
+                "destination": "upload",
+                "signingStyle": "automatic",
+                "manageAppVersionAndBuildNumber": True,
+                "uploadSymbols": True,
+            }, datei)
+        self.schritte = []
+        for app in auswahl:
+            for plattform, scheme, ziel in app[3]:
+                self.schritte.append({
+                    "app": app, "plattform": plattform, "scheme": scheme, "ziel": ziel,
+                    "status": OFFEN, "phase": "", "dauer": 0.0, "fehler": [], "version": "",
+                    "log": os.path.join(self.log_ordner, "%s-%s.log" % (app[0], plattform)),
+                })
+        self.aktuell = None
+        self.start = time.time()
+
+    # --- Anzeige -----------------------------------------------------------
+
+    def zeichnen(self):
+        bild = self.bild
+        bild.erase()
+        hoehe, breite = bild.getmaxyx()
+        schreiben(bild, 0, 0, "TestFlight-Upload läuft   (Ctrl-C bricht ab)", curses.A_BOLD)
+        schreiben(bild, 1, 0, "Gesamtzeit %s" % dauer_text(time.time() - self.start))
+        zeile = 3
+        for schritt in self.schritte:
+            if zeile >= hoehe - 6:
+                break
+            status = schritt["status"]
+            text = "%-24s %-6s %-12s" % (schritt["app"][0], schritt["plattform"], status)
+            if status == LAEUFT:
+                text += " %s  %s" % (schritt["phase"], dauer_text(time.time() - schritt["beginn"]))
+            elif status in (OK, FEHLER):
+                text += " %s" % dauer_text(schritt["dauer"])
+            schreiben(bild, zeile, 0, text, farbe(status))
+            zeile += 1
+        if self.aktuell:
+            unten = max(zeile + 1, hoehe - 5)
+            schreiben(bild, unten, 0, "Protokoll: " + self.aktuell["log"], curses.A_DIM)
+            for nummer, text in enumerate(log_ende(self.aktuell["log"], 4)):
+                schreiben(bild, unten + 1 + nummer, 0, text[:breite - 1], curses.A_DIM)
+        bild.refresh()
+
+    # --- Ausführung --------------------------------------------------------
+
+    def befehl(self, schritt, phase, argumente, ordner):
+        schritt["phase"] = phase
+        with open(schritt["log"], "ab") as log:
+            log.write(("\n===== %s =====\n%s\n\n" % (phase, self.zugang.maskiert(argumente))).encode("utf-8"))
+            log.flush()
+            prozess = subprocess.Popen(argumente, cwd=ordner, stdout=log, stderr=subprocess.STDOUT,
+                                       stdin=subprocess.DEVNULL)
+            try:
+                while prozess.poll() is None:
+                    self.zeichnen()
+                    time.sleep(0.5)
+            except KeyboardInterrupt:
+                prozess.terminate()
+                try:
+                    prozess.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    prozess.kill()
+                raise
+        return prozess.returncode == 0
+
+    def ein_schritt(self, schritt):
+        app = schritt["app"]
+        ordner = os.path.join(BASIS, app[1])
+        projekt = projekt_pfad(app)
+        if not os.path.isdir(projekt):
+            schritt["fehler"] = ["Xcode-Projekt nicht gefunden: " + projekt]
+            return False
+        archiv = os.path.join(ARCHIV_BASIS, self.stempel[:10], "%s %s.xcarchive" % (schritt["scheme"], self.stempel))
+        os.makedirs(os.path.dirname(archiv), exist_ok=True)
+        bauen = ["xcodebuild", "archive", "-project", projekt, "-scheme", schritt["scheme"],
+                 "-configuration", "Release", "-destination", schritt["ziel"],
+                 "-archivePath", archiv] + self.zugang.argumente()
+        if not self.befehl(schritt, "Bauen", bauen, ordner):
+            schritt["fehler"] = ["Bauen fehlgeschlagen"] + fehler_aus_log(schritt["log"])
+            return False
+        schritt["version"] = archiv_version(archiv)
+        export_ordner = os.path.join(self.log_ordner, "export-%s-%s" % (app[0], schritt["plattform"]))
+        hochladen = ["xcodebuild", "-exportArchive", "-archivePath", archiv,
+                     "-exportOptionsPlist", self.export_plist,
+                     "-exportPath", export_ordner] + self.zugang.argumente()
+        if not self.befehl(schritt, "Hochladen", hochladen, ordner):
+            schritt["fehler"] = ["Hochladen fehlgeschlagen"] + fehler_aus_log(schritt["log"])
+            return False
+        return True
+
+    def ausfuehren(self):
+        try:
+            for schritt in self.schritte:
+                self.aktuell = schritt
+                schritt["status"] = LAEUFT
+                schritt["beginn"] = time.time()
+                try:
+                    erfolg = self.ein_schritt(schritt)
+                except OSError as ausnahme:
+                    schritt["fehler"] = [str(ausnahme)]
+                    erfolg = False
+                schritt["dauer"] = time.time() - schritt["beginn"]
+                schritt["status"] = OK if erfolg else FEHLER
+                self.zeichnen()
+        except KeyboardInterrupt:
+            for schritt in self.schritte:
+                if schritt["status"] in (OFFEN, LAEUFT):
+                    schritt["status"] = ABBRUCH
+                    schritt["fehler"] = ["Vom Nutzer abgebrochen"]
+        self.aktuell = None
+
+    # --- Bericht -----------------------------------------------------------
+
+    def bericht(self):
+        """Liefert den Statusbericht als Liste (Text, Status) und speichert ihn als Datei."""
+        zaehler = {OK: 0, FEHLER: 0, ABBRUCH: 0}
+        zeilen = [("Statusbericht TestFlight-Upload  %s" % self.stempel, None), ("", None)]
+        for schritt in self.schritte:
+            zaehler[schritt["status"]] = zaehler.get(schritt["status"], 0) + 1
+            text = "%-24s %-6s %-12s %6s" % (schritt["app"][0], schritt["plattform"], schritt["status"],
+                                             dauer_text(schritt["dauer"]))
+            if schritt["version"]:
+                text += "   Version im Archiv %s" % schritt["version"]
+            zeilen.append((text, schritt["status"]))
+            for fehler in schritt["fehler"]:
+                zeilen.append(("      " + fehler, schritt["status"]))
+            if schritt["status"] == FEHLER:
+                zeilen.append(("      Protokoll: " + schritt["log"], None))
+        zeilen.append(("", None))
+        zeilen.append(("Erfolgreich: %d   Fehler: %d   Abgebrochen: %d   Gesamtzeit: %s" % (
+            zaehler[OK], zaehler[FEHLER], zaehler[ABBRUCH], dauer_text(time.time() - self.start)), None))
+        datei_pfad = os.path.join(self.log_ordner, "statusbericht.txt")
+        with open(datei_pfad, "w", encoding="utf-8") as datei:
+            datei.write("\n".join(text for text, _ in zeilen) + "\n")
+        zeilen.append(("Bericht gespeichert: " + datei_pfad, None))
+        return zeilen
+
+
+FARBEN = {}
+
+
+def farbe(status):
+    return FARBEN.get(status, curses.A_NORMAL)
+
+
+def schreiben(bild, zeile, spalte, text, attribut=curses.A_NORMAL):
+    hoehe, breite = bild.getmaxyx()
+    if zeile < 0 or zeile >= hoehe or spalte >= breite:
+        return
+    try:
+        bild.addstr(zeile, spalte, text[:max(0, breite - spalte - 1)], attribut)
+    except curses.error:
+        pass
+
+
+def bericht_zeigen(bild, zeilen):
+    """Zeigt den Statusbericht. Rückgabe True = zurück ins Menü, False = beenden."""
+    oben = 0
+    while True:
+        bild.erase()
+        hoehe, _ = bild.getmaxyx()
+        sichtbar = max(1, hoehe - 2)
+        oben = max(0, min(oben, len(zeilen) - sichtbar))
+        for nummer, (text, status) in enumerate(zeilen[oben:oben + sichtbar]):
+            schreiben(bild, nummer, 0, text, curses.A_BOLD if oben + nummer == 0 else farbe(status))
+        schreiben(bild, hoehe - 1, 0, "X = zurück ins Menü   Pfeiltasten = blättern   Q = beenden", curses.A_REVERSE)
+        bild.refresh()
+        taste = bild.getch()
+        if taste in (ord("x"), ord("X")):
+            return True
+        if taste in (ord("q"), ord("Q")):
+            return False
+        if taste == curses.KEY_UP:
+            oben -= 1
+        elif taste == curses.KEY_DOWN:
+            oben += 1
+
+
+def menue(bild):
+    curses.curs_set(0)
+    bild.keypad(True)
+    if curses.has_colors():
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_GREEN, -1)
+        curses.init_pair(2, curses.COLOR_RED, -1)
+        curses.init_pair(3, curses.COLOR_YELLOW, -1)
+        FARBEN.update({OK: curses.color_pair(1), FEHLER: curses.color_pair(2),
+                       ABBRUCH: curses.color_pair(3), LAEUFT: curses.color_pair(3) | curses.A_BOLD})
+    gewaehlt = [False] * len(APPS)
+    zeiger = 0
+    meldung = ""
+    while True:
+        bild.erase()
+        hoehe, _ = bild.getmaxyx()
+        schreiben(bild, 0, 0, "TestFlight-Upload", curses.A_BOLD)
+        schreiben(bild, 1, 0, "Pfeiltasten wählen, Leertaste selektiert")
+        for nummer, app in enumerate(APPS):
+            plattformen = " + ".join(p for p, _, _ in app[3])
+            text = "%s [%s] %-24s %-12s" % (">" if nummer == zeiger else " ", "x" if gewaehlt[nummer] else " ",
+                                            app[0], plattformen)
+            schreiben(bild, 3 + nummer, 0, text, curses.A_REVERSE if nummer == zeiger else curses.A_NORMAL)
+            hinweis = app_hinweis(app)
+            if hinweis:
+                schreiben(bild, 3 + nummer, len(text) + 2, hinweis, FARBEN.get(ABBRUCH, curses.A_DIM))
+        unten = 4 + len(APPS)
+        schreiben(bild, unten, 0, "%d von %d selektiert" % (sum(gewaehlt), len(APPS)))
+        if meldung:
+            schreiben(bild, unten + 1, 0, meldung, FARBEN.get(FEHLER, curses.A_BOLD))
+        schreiben(bild, hoehe - 1, 0,
+                  "Leertaste = an/aus   S = alle   D = keine   W = bauen und hochladen   Q = beenden",
+                  curses.A_REVERSE)
+        bild.refresh()
+        taste = bild.getch()
+        meldung = ""
+        if taste in (ord("q"), ord("Q")):
+            return
+        if taste in (curses.KEY_UP, ord("k")):
+            zeiger = (zeiger - 1) % len(APPS)
+        elif taste in (curses.KEY_DOWN, ord("j")):
+            zeiger = (zeiger + 1) % len(APPS)
+        elif taste == ord(" "):
+            gewaehlt[zeiger] = not gewaehlt[zeiger]
+        elif taste in (ord("s"), ord("S")):
+            gewaehlt = [True] * len(APPS)
+        elif taste in (ord("d"), ord("D")):
+            gewaehlt = [False] * len(APPS)
+        elif taste in (ord("w"), ord("W")):
+            auswahl = [app for app, an in zip(APPS, gewaehlt) if an]
+            if not auswahl:
+                meldung = "Keine App selektiert."
+                continue
+            if not shutil.which("xcodebuild"):
+                meldung = "xcodebuild nicht gefunden."
+                continue
+            try:
+                zugang = Zugang()
+            except RuntimeError as ausnahme:
+                meldung = str(ausnahme)
+                continue
+            lauf = Lauf(bild, zugang, auswahl)
+            lauf.ausfuehren()
+            curses.flushinp()
+            if not bericht_zeigen(bild, lauf.bericht()):
+                return
+
+
+def pruefen():
+    """Prüft Zugangsdaten und Projekte ohne zu bauen. Gibt keine geheimen Werte aus."""
+    in_ordnung = True
+    try:
+        Zugang()
+        print("Zugangsdaten: gefunden (Schlüsseldatei und Issuer-ID)")
+    except RuntimeError as ausnahme:
+        print("Zugangsdaten: FEHLER – %s" % ausnahme)
+        in_ordnung = False
+    print("xcodebuild: %s" % (shutil.which("xcodebuild") or "FEHLT"))
+    for app in APPS:
+        hinweis = app_hinweis(app)
+        if hinweis.startswith(("Projekt", "Scheme")):
+            in_ordnung = False
+        print("%-24s %-12s %s" % (app[0], " + ".join(p for p, _, _ in app[3]), hinweis or "ok"))
+    return 0 if in_ordnung else 1
+
+
+def main():
+    locale.setlocale(locale.LC_ALL, "")
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "--pruefen":
+            return pruefen()
+        print(__doc__)
+        return 0 if sys.argv[1] in ("-h", "--help") else 2
+    try:
+        curses.wrapper(menue)
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
