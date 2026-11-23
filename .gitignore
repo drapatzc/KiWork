@@ -17,3 +17,9 @@ Icon
 .VolumeIcon.icns
 .com.apple.timemachine.donotpresent
 .DS_Store
+
+### TestFlight-Skript: Protokolle werden bei jedem Lauf neu erzeugt
+testflight-logs/
+
+### Persönliche Shell-Konfiguration mit API-Schlüsseln und Passwörtern
+zshrc
