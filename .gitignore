@@ -23,3 +23,6 @@ testflight-logs/
 
 ### Persönliche Shell-Konfiguration mit API-Schlüsseln und Passwörtern
 zshrc
+
+### Python-Bytecode
+__pycache__/

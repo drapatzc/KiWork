@@ -52,8 +52,10 @@ ARCHIV_BASIS = os.path.expanduser("~/Library/Developer/Xcode/Archives")
 
 IOS = "generic/platform=iOS"
 MAC = "generic/platform=macOS"
+TV = "generic/platform=tvOS"
 
 # Anzeigename, Ordner, Xcode-Projekt, Liste (Plattform, Scheme, Ziel).
+# Statt des Projekts kann ein Workspace (.xcworkspace) stehen, nötig bei CocoaPods.
 # Watch-Apps und Widgets stecken im iOS-Scheme und werden mit hochgeladen.
 # Eine Plattform, die nicht hochgeladen werden soll, einfach aus der Liste nehmen.
 APPS = [
@@ -75,6 +77,16 @@ APPS = [
      [("iOS", "SpotBack", IOS), ("macOS", "SpotBackMac", MAC)]),
     ("onetwoScanner", "onetwoscan", "OneTwoScanner.xcodeproj",
      [("iOS", "OneTwoScanner", IOS)]),
+    ("Battle Alliance", "TowerDefense", "TowerDefense.xcodeproj",
+     [("iOS", "iOS-Produktiv", IOS), ("tvOS", "tvOS-Produktiv", TV)]),
+    ("Strategy War", "TowerDefense2", "TowerDefense.xcodeproj",
+     [("iOS", "iOS-Produktiv", IOS)]),
+    ("Tower Arena", "TowerArena", "TowerDefense.xcodeproj",
+     [("iOS", "iOS Produktiv", IOS)]),
+    ("Crazy Monsters", "monsters", "TowerDefense.xcodeproj",
+     [("iOS", "MonsterIOSProd", IOS)]),
+    ("ScanBox", "scanbox", "ScanBox.xcworkspace",
+     [("iOS", "ScanBox", IOS)]),
 ]
 
 OK, FEHLER, ABBRUCH, OFFEN, LAEUFT = "OK", "FEHLER", "ABGEBROCHEN", "wartet", "läuft"
@@ -121,6 +133,14 @@ def app_hinweis(app):
     for _, scheme, _ in app[3]:
         if not os.path.isfile(os.path.join(projekt, "xcshareddata", "xcschemes", scheme + ".xcscheme")):
             return "Scheme %s fehlt" % scheme
+    lock = os.path.join(BASIS, app[1], "Podfile.lock")
+    if os.path.isfile(lock):
+        try:
+            with open(lock, "rb") as soll, open(os.path.join(BASIS, app[1], "Pods", "Manifest.lock"), "rb") as ist:
+                if soll.read() != ist.read():
+                    return "pod install nötig"
+        except OSError:
+            return "pod install nötig"
     yml = os.path.join(BASIS, app[1], "project.yml")
     pbx = os.path.join(projekt, "project.pbxproj")
     if os.path.isfile(yml) and os.path.isfile(pbx) and os.path.getmtime(yml) > os.path.getmtime(pbx):
@@ -257,7 +277,8 @@ class Lauf:
             return False
         archiv = os.path.join(ARCHIV_BASIS, self.stempel[:10], "%s %s.xcarchive" % (schritt["scheme"], self.stempel))
         os.makedirs(os.path.dirname(archiv), exist_ok=True)
-        bauen = ["xcodebuild", "archive", "-project", projekt, "-scheme", schritt["scheme"],
+        art = "-workspace" if projekt.endswith(".xcworkspace") else "-project"
+        bauen = ["xcodebuild", "archive", art, projekt, "-scheme", schritt["scheme"],
                  "-configuration", "Release", "-destination", schritt["ziel"],
                  "-archivePath", archiv] + self.zugang.argumente()
         if not self.befehl(schritt, "Bauen", bauen, ordner):
